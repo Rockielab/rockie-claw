@@ -1,0 +1,6 @@
+{
+  "skills_repo": "saml212/platform-skills",
+  "branch": "main",
+  "fetch_strategy": "managed-hooks-symlink",
+  "comment": "Single point of truth for which platform-skills revision a tenant runs. The control plane writes this when provisioning; tenant/start.sh reads it on start."
+}

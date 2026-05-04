@@ -1,0 +1,24 @@
+{
+  "_comment": "Per-tenant openclaw config template. Substituted by tenant/start.sh: TENANT_NAME, TENANT_PORT, TENANT_WORKSPACE_DIR, TENANT_LOG_DIR.",
+  "workspace": {
+    "dir": "${TENANT_WORKSPACE_DIR}"
+  },
+  "gateway": {
+    "port": ${TENANT_PORT},
+    "logFile": "${TENANT_LOG_DIR}/gateway.log"
+  },
+  "hooks": {
+    "internal": {
+      "enabled": true,
+      "load": {
+        "extraDirs": ["${TENANT_WORKSPACE_DIR}/hooks-managed"]
+      },
+      "entries": {
+        "rockie-session-start":     { "enabled": true },
+        "rockie-stop":              { "enabled": true },
+        "rockie-message-received":  { "enabled": true },
+        "rockie-compact-before":    { "enabled": true }
+      }
+    }
+  }
+}
