@@ -119,6 +119,60 @@ func TestSpawnHappyPath(t *testing.T) {
 // validates the framing scheme: stdin frame in, stdout frame out, exit
 // frame at the end. This is the "one PTY framing roundtrip with a mocked
 // binary" called for in the Phase 2 spec.
+func TestChatRequiresToken(t *testing.T) {
+	t.Setenv("BROKER_TENANT_TOKEN", "tt")
+	req := httptest.NewRequest(http.MethodPost, "/chat?binary=claude", strings.NewReader(`{"prompt":"hi"}`))
+	rec := httptest.NewRecorder()
+	chatHandler(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestChatRejectsInvalidBinary(t *testing.T) {
+	t.Setenv("BROKER_TENANT_TOKEN", "tt")
+	req := httptest.NewRequest(http.MethodPost, "/chat?binary=python&token=tt", strings.NewReader(`{"prompt":"hi"}`))
+	rec := httptest.NewRecorder()
+	chatHandler(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestChatRejectsEmptyPrompt(t *testing.T) {
+	t.Setenv("BROKER_TENANT_TOKEN", "tt")
+	req := httptest.NewRequest(http.MethodPost, "/chat?binary=claude&token=tt", strings.NewReader(`{"prompt":""}`))
+	rec := httptest.NewRecorder()
+	chatHandler(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFlattenHistory(t *testing.T) {
+	got := flattenHistory(nil, "hi")
+	if got != "hi" {
+		t.Fatalf("empty history should pass through prompt; got %q", got)
+	}
+
+	turns := []chatTurn{
+		{Role: "user", Content: "first user message"},
+		{Role: "assistant", Content: "assistant reply"},
+	}
+	got = flattenHistory(turns, "second user message")
+	if !strings.Contains(got, "first user message") ||
+		!strings.Contains(got, "assistant reply") ||
+		!strings.Contains(got, "second user message") {
+		t.Fatalf("flattened prompt missing turns: %q", got)
+	}
+	// Order must preserve history then current prompt.
+	idxFirst := strings.Index(got, "first user message")
+	idxSecond := strings.Index(got, "second user message")
+	if idxFirst < 0 || idxSecond < 0 || idxFirst >= idxSecond {
+		t.Fatalf("history must precede current prompt; got %q", got)
+	}
+}
+
 func TestPTYFramingRoundtrip(t *testing.T) {
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skipf("bash not available on this host: %v", err)

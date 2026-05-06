@@ -12,6 +12,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/subtle"
 	"encoding/binary"
@@ -448,6 +449,221 @@ func spawnHandler(w http.ResponseWriter, r *http.Request) {
 	log("spawn: binary=%s args=%v exit=%d timed_out=%v", req.Binary, req.Args, resp.ExitCode, resp.TimedOut)
 }
 
+// chatRequest is the JSON body for POST /chat.
+type chatRequest struct {
+	Prompt  string        `json:"prompt"`
+	History []chatTurn    `json:"history"`
+	Cwd     string        `json:"cwd"`     // optional; defaults to $HOME
+	Timeout int           `json:"timeout"` // optional seconds; default 600
+}
+
+type chatTurn struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// flattenHistory builds a single string prompt from prior turns + the
+// current prompt. Both `claude -p` and `codex exec` accept a single
+// prompt string in non-interactive mode; richer multi-turn session
+// support (--continue / --resume) is a v2 concern.
+func flattenHistory(history []chatTurn, current string) string {
+	if len(history) == 0 {
+		return current
+	}
+	var b strings.Builder
+	for _, t := range history {
+		role := t.Role
+		if role == "" {
+			role = "user"
+		}
+		b.WriteString(fmt.Sprintf("[%s]\n%s\n\n", role, t.Content))
+	}
+	b.WriteString("[user]\n")
+	b.WriteString(current)
+	return b.String()
+}
+
+// chatHandler is the JSON-streaming endpoint used by the unified agent
+// router in platform-context. Spawns the binary (claude/codex) in
+// headless stream-json mode and streams stdout line-by-line as the
+// HTTP response body.
+//
+// POST /chat?binary=claude|codex
+//   body:    {"prompt": str, "history": [...], "cwd": str?, "timeout": int?}
+//   auth:    Bearer BROKER_TENANT_TOKEN OR ?token=
+//   reply:   200 + Content-Type: application/x-ndjson, one JSON event
+//            per line, terminated when the binary exits.
+//
+// On invocation failure: 4xx/5xx with a JSON error body (not ndjson).
+// Once streaming has started, errors are emitted as a final ndjson
+// frame: {"type":"error","code":"...","message":"..."}.
+func chatHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+			"only POST is allowed on /chat")
+		return
+	}
+
+	tok := r.URL.Query().Get("token")
+	if tok == "" {
+		ah := r.Header.Get("Authorization")
+		if strings.HasPrefix(ah, "Bearer ") {
+			tok = strings.TrimPrefix(ah, "Bearer ")
+		}
+	}
+	expected := brokerToken()
+	if expected == "" {
+		jsonError(w, http.StatusInternalServerError, "broker_token_unset",
+			"BROKER_TENANT_TOKEN is not set on this machine")
+		return
+	}
+	if !constantTimeStringEq(tok, expected) {
+		jsonError(w, http.StatusUnauthorized, "invalid_token",
+			"missing or invalid token")
+		return
+	}
+
+	binary := r.URL.Query().Get("binary")
+	if binary == "" {
+		binary = "claude"
+	}
+	if binary != "claude" && binary != "codex" {
+		jsonError(w, http.StatusBadRequest, "invalid_binary",
+			"binary must be claude or codex")
+		return
+	}
+
+	var req chatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "bad_request",
+			"invalid JSON body")
+		return
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		jsonError(w, http.StatusBadRequest, "empty_prompt",
+			"prompt is required")
+		return
+	}
+	if req.Timeout <= 0 {
+		req.Timeout = 600 // 10 min default; long enough for tool-using turns
+	}
+	if req.Cwd == "" {
+		req.Cwd = os.Getenv("HOME")
+	}
+
+	flatPrompt := flattenHistory(req.History, req.Prompt)
+
+	var args []string
+	switch binary {
+	case "claude":
+		// Claude Code CLI: `-p` non-interactive, stream-json output.
+		// --verbose ensures all events emit (system, assistant, tool_use,
+		// tool_result, result). --include-partial-messages gives us
+		// content_block_delta tokens as they stream.
+		args = []string{
+			"-p", flatPrompt,
+			"--output-format", "stream-json",
+			"--verbose",
+			"--include-partial-messages",
+		}
+	case "codex":
+		// Codex CLI: `exec` is the headless invocation. JSON output
+		// format pending verification; use `--json` for structured
+		// streaming when available, fall back to plain text otherwise.
+		// Platform-context's CodexBrokerBackend accepts either; the
+		// translator handles plaintext as raw token frames.
+		args = []string{"exec", "--json", flatPrompt}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(),
+		time.Duration(req.Timeout)*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Dir = req.Cwd
+	cmd.Env = filteredEnv(os.Environ(), []string{"BROKER_TENANT_TOKEN"})
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "stdout_pipe_failed",
+			"could not attach stdout pipe")
+		return
+	}
+	stderrBuf := &strings.Builder{}
+	cmd.Stderr = stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		jsonError(w, http.StatusInternalServerError, "spawn_failed",
+			fmt.Sprintf("could not spawn %s: %v", binary, err))
+		return
+	}
+
+	// Streaming response. Each line of the binary's stdout is one
+	// JSON event in stream-json format; we relay it verbatim.
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no") // nginx/CF passthrough hint
+	w.WriteHeader(http.StatusOK)
+
+	flusher, _ := w.(http.Flusher)
+	scanner := bufio.NewScanner(stdout)
+	// Allow long lines — claude can emit large content_block_start
+	// events with full message content blocks.
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+
+	lineCount := 0
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		_, _ = w.Write(line)
+		_, _ = w.Write([]byte{'\n'})
+		if flusher != nil {
+			flusher.Flush()
+		}
+		lineCount++
+	}
+	scanErr := scanner.Err()
+
+	waitErr := cmd.Wait()
+
+	// Emit a final synthesized error frame if the binary exited badly,
+	// since the unified protocol on the platform-context side expects a
+	// final `done` frame and won't get one if the binary just died.
+	if waitErr != nil || scanErr != nil {
+		errorMsg := ""
+		if waitErr != nil {
+			errorMsg = waitErr.Error()
+		}
+		if scanErr != nil {
+			if errorMsg != "" {
+				errorMsg += "; "
+			}
+			errorMsg += "scan: " + scanErr.Error()
+		}
+		// Truncate stderr to keep the wire payload bounded.
+		stderrTail := stderrBuf.String()
+		if len(stderrTail) > 1024 {
+			stderrTail = stderrTail[len(stderrTail)-1024:]
+		}
+		errorFrame := map[string]any{
+			"type":    "error",
+			"code":    "broker_runner_failed",
+			"message": fmt.Sprintf("%s exited with: %s", binary, errorMsg),
+			"stderr":  stderrTail,
+		}
+		bs, _ := json.Marshal(errorFrame)
+		_, _ = w.Write(bs)
+		_, _ = w.Write([]byte{'\n'})
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	log("chat: binary=%s lines=%d wait_err=%v", binary, lineCount, waitErr)
+}
+
 // log writes to stderr without ever including secrets. We intentionally
 // keep this tiny rather than pulling in a logging library.
 func log(format string, args ...any) {
@@ -460,6 +676,7 @@ func run() error {
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/ws", wsHandler)
 	mux.HandleFunc("/spawn", spawnHandler)
+	mux.HandleFunc("/chat", chatHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + brokerPort(),
