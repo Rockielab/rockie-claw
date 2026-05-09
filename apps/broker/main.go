@@ -567,12 +567,13 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 			"--include-partial-messages",
 		}
 	case "codex":
-		// Codex CLI: `exec` is the headless invocation. JSON output
-		// format pending verification; use `--json` for structured
-		// streaming when available, fall back to plain text otherwise.
-		// Platform-context's CodexBrokerBackend accepts either; the
-		// translator handles plaintext as raw token frames.
-		args = []string{"exec", "--json", flatPrompt}
+		// Codex CLI: `exec` is the headless invocation. `--json`
+		// emits structured stream-json that CodexBrokerBackend's
+		// translator parses. `--skip-git-repo-check` is required —
+		// /home/runtime is not a git repo, so codex refuses to start
+		// without this flag (verified live: "Not inside a trusted
+		// directory and --skip-git-repo-check was not specified").
+		args = []string{"exec", "--json", "--skip-git-repo-check", flatPrompt}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(),
