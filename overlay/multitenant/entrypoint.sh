@@ -78,6 +78,24 @@ else
   BROKER_PID=
 fi
 
+# --- rockie-loop daemon (MVP step 9) ---------------------------------------
+# Continuous autoresearch loop. Pops queued experiments, polls in-flight
+# jobs, plans new candidates on idle. Lives at /opt/rockie-loop and runs
+# in the background so the broker stays the foreground process Fly
+# tracks for liveness.
+if [ -x /usr/local/bin/rockie-loop ] && [ -n "${ROCKIELAB_TENANT_TOKEN:-}" ]; then
+  log "rockie-loop: starting (api=${ROCKIELAB_API_BASE}, mode=${MODE})"
+  /usr/local/bin/rockie-loop run >> /tmp/rockie-loop.log 2>&1 &
+  LOOP_PID=$!
+  log "rockie-loop: pid=${LOOP_PID}"
+elif [ ! -x /usr/local/bin/rockie-loop ]; then
+  log "WARN: /usr/local/bin/rockie-loop not present; autoresearch loop disabled."
+  LOOP_PID=
+else
+  log "WARN: ROCKIELAB_TENANT_TOKEN unset; skipping rockie-loop (would 401)."
+  LOOP_PID=
+fi
+
 case "$MODE" in
   subscription)
     log "MODE=subscription; tenant uses official claude/codex CLIs via OAuth."

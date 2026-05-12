@@ -248,6 +248,15 @@ COPY --chown=root:root overlay/multitenant/rockie-compute /opt/rockie-compute/ro
 RUN chmod 755 /opt/rockie-compute/rockie-compute && \
     ln -sf /opt/rockie-compute/rockie-compute /usr/local/bin/rockie-compute
 
+# rockie-loop daemon (MVP step 9) — the continuous autoresearch loop
+# that makes the "Rockie never sleeps" pitch literally true. stdlib-
+# only Python, same shape as the rockie-gpu / rockie-compute CLIs.
+# Launched by entrypoint.sh as a background process at machine boot.
+RUN install -d -m 0755 /opt/rockie-loop
+COPY --chown=root:root overlay/multitenant/rockie-loop/rockie_loop.py /opt/rockie-loop/rockie_loop.py
+RUN chmod 755 /opt/rockie-loop/rockie_loop.py && \
+    ln -sf /opt/rockie-loop/rockie_loop.py /usr/local/bin/rockie-loop
+
 # Drop in the mcp-rockie MCP server (Phase 5 h.3) so claude/codex can
 # call list_labs / get_lab / search / submit_experiment / etc. against
 # platform-context.
