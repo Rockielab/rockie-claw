@@ -1,9 +1,9 @@
 {
   "name": "mcp-rockie",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "private": true,
-  "description": "Rockie artifact-ops MCP server. Lets claude/codex call list_labs / get_lab / search / submit_experiment / etc. against the platform-context API.",
+  "description": "Rockie agent tools MCP server. 18-tool surface: notebooks, sources, notes, insights, transformations, podcasts, artifacts, search, ask, compute (experiment_submit/job_status), and emit_artifact (four-destination fan-out: chat/ui/github/huggingface).",
   "main": "server.js",
   "bin": {
     "mcp-rockie": "./server.js"
