@@ -96,6 +96,61 @@ case "$MODE" in
       log "WARN: no OPENCLAW_GATEWAY_TOKEN and no BROKER_TENANT_TOKEN — gateway will be open."
     fi
 
+    # Seed a minimal openclaw.json that pins the default agent model to
+    # whatever provider the tenant's BYOK_PROVIDER says. Without this,
+    # OpenClaw's hardcoded default is openai/gpt-5.5
+    # (src/agents/defaults.ts:DEFAULT_PROVIDER/DEFAULT_MODEL), which
+    # ignores the tenant's ANTHROPIC_API_KEY and surfaces as
+    # "Error: internal error" on every chat completion.
+    #
+    # BYOK_PROVIDER is set by the wizard alongside ANTHROPIC_API_KEY (or
+    # the equivalent provider key). BYOK_MODEL_ID is the user-picked
+    # model id; we map that to OpenClaw's `provider/model` form here.
+    #
+    # We only seed the file if it doesn't already exist — re-launching a
+    # tenant must not clobber any setup-wizard-managed config the
+    # gateway may have written into the volume.
+    CONFIG_DIR="$HOME/.openclaw"
+    CONFIG_FILE="$CONFIG_DIR/openclaw.json"
+    if [ "$MODE" = "byok" ] && [ -n "${BYOK_PROVIDER:-}" ]; then
+      mkdir -p "$CONFIG_DIR"
+      PROVIDER="${BYOK_PROVIDER}"
+      MODEL_ID="${BYOK_MODEL_ID:-}"
+      # If BYOK_MODEL_ID is already "provider/model", strip the
+      # provider prefix; otherwise use the raw id (the wizard sets
+      # bare ids like "claude-sonnet-4-20250514").
+      case "$MODEL_ID" in
+        */*) MODEL_ONLY="${MODEL_ID#*/}" ;;
+        "")  MODEL_ONLY="" ;;
+        *)   MODEL_ONLY="$MODEL_ID" ;;
+      esac
+      # Provider-specific default model when the user didn't pick one.
+      if [ -z "$MODEL_ONLY" ]; then
+        case "$PROVIDER" in
+          anthropic) MODEL_ONLY="claude-sonnet-4-6" ;;
+          openai)    MODEL_ONLY="gpt-5.5" ;;
+          google)    MODEL_ONLY="gemini-3.1-pro-preview" ;;
+          *)         MODEL_ONLY="" ;;
+        esac
+      fi
+      if [ -n "$MODEL_ONLY" ]; then
+        MODEL_REF="${PROVIDER}/${MODEL_ONLY}"
+        log "openclaw: seeding ${CONFIG_FILE} with agents.defaults.model.primary=${MODEL_REF}"
+        cat > "$CONFIG_FILE" <<EOF
+{
+  "agents": {
+    "defaults": {
+      "model": { "primary": "${MODEL_REF}" }
+    }
+  }
+}
+EOF
+        chmod 600 "$CONFIG_FILE"
+      else
+        log "WARN: BYOK_PROVIDER=${PROVIDER} but no usable model — leaving default agent model untouched"
+      fi
+    fi
+
     cd /app
     GATEWAY_ARGS=(--port "$OPENCLAW_PORT" --bind "$OPENCLAW_BIND" --host "$OPENCLAW_HOST")
     if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then

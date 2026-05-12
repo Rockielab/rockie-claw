@@ -188,7 +188,16 @@ COPY --from=runtime-assets /app/patches ./patches
 COPY --from=runtime-assets /app/openclaw.mjs ./openclaw.mjs
 COPY --from=runtime-assets /app/${OPENCLAW_BUNDLED_PLUGIN_DIR} ./${OPENCLAW_BUNDLED_PLUGIN_DIR}
 COPY --from=runtime-assets /app/skills ./openclaw-skills
-COPY --from=runtime-assets /app/docs ./openclaw-docs
+# OpenClaw's agent workspace bootstrap loads templates from a path
+# resolved via resolveWorkspaceTemplateDir (src/agents/workspace-templates.ts):
+# the first candidate is `packageRoot/docs/reference/templates`. Copying
+# upstream's `docs/` to `./docs` (not `./openclaw-docs`) lets the lookup
+# resolve so chat completions don't fail with
+# "Missing workspace template: AGENTS.md". The previous `openclaw-docs`
+# target was a defensive rename to avoid colliding with a Rockie-side
+# docs/ tree — but no Rockie docs/ tree exists inside the image, so the
+# rename was unnecessary and broke the BYOK / open-weights chat path.
+COPY --from=runtime-assets /app/docs ./docs
 COPY --from=runtime-assets /app/qa ./openclaw-qa
 
 # Add a `dist/index.js` shim for the entrypoint's `node /app/dist/index.js gateway`
