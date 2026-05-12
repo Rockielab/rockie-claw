@@ -48,17 +48,20 @@ export ROCKIELAB_API_BASE="${ROCKIELAB_API_BASE:-https://api.rockielab.com}"
 #                               just be a no-op because /api/notebooks
 #                               returns []). New tenants always have
 #                               ROCKIELAB_TENANT_ID. Task #64.
-if [ -z "${ROCKIELAB_TENANT_TOKEN:-}" ]; then
-  if [ -n "${ROCKIELAB_TENANT_ID:-}" ]; then
-    export ROCKIELAB_TENANT_TOKEN="$ROCKIELAB_TENANT_ID"
-  elif [ -n "${BROKER_TENANT_TOKEN:-}" ]; then
-    export ROCKIELAB_TENANT_TOKEN="$BROKER_TENANT_TOKEN"
-    # `log` is defined further down (after the OpenClaw vars); use a
-    # direct echo here so the warning still surfaces.
-    printf '[entrypoint] %s\n' \
-      "WARN: ROCKIELAB_TENANT_ID unset; falling back to BROKER_TENANT_TOKEN for X-Tenant-Token. Daemon /api/notebooks will return [] until ROCKIELAB_TENANT_ID is staged (task #64)." \
-      >&2
-  fi
+# ROCKIELAB_TENANT_ID wins unconditionally when set, because pre-fix
+# tenants may have ROCKIELAB_TENANT_TOKEN already staged as a Fly secret
+# pointing at the broker token (the MVP9 closer set this thinking it
+# was the right value). We force-overwrite that legacy value so the
+# daemon's X-Tenant-Token always resolves to the tenant_id server-side.
+if [ -n "${ROCKIELAB_TENANT_ID:-}" ]; then
+  export ROCKIELAB_TENANT_TOKEN="$ROCKIELAB_TENANT_ID"
+elif [ -z "${ROCKIELAB_TENANT_TOKEN:-}" ] && [ -n "${BROKER_TENANT_TOKEN:-}" ]; then
+  export ROCKIELAB_TENANT_TOKEN="$BROKER_TENANT_TOKEN"
+  # `log` is defined further down (after the OpenClaw vars); use a
+  # direct echo here so the warning still surfaces.
+  printf '[entrypoint] %s\n' \
+    "WARN: ROCKIELAB_TENANT_ID unset; falling back to BROKER_TENANT_TOKEN for X-Tenant-Token. Daemon /api/notebooks will return [] until ROCKIELAB_TENANT_ID is staged (task #64)." \
+    >&2
 fi
 # OpenClaw gateway needs to listen on the Fly machine's external
 # interface so platform-context can HTTP-proxy to it through the
