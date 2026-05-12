@@ -138,6 +138,7 @@ case "$MODE" in
         log "openclaw: seeding ${CONFIG_FILE} with agents.defaults.model.primary=${MODEL_REF}"
         cat > "$CONFIG_FILE" <<EOF
 {
+  "gateway": { "mode": "local" },
   "agents": {
     "defaults": {
       "model": { "primary": "${MODEL_REF}" }
