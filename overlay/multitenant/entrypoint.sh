@@ -211,6 +211,65 @@ EOF
       fi
     fi
 
+    # Wire mcp-rockie into the OpenClaw gateway (fleet-task #24).
+    #
+    # OpenClaw's config schema is `mcp.servers.<name>` (NESTED), not the
+    # top-level `mcpServers.<name>` that the Claude/Codex CLIs use. See
+    # `src/config/types.mcp.ts` (McpConfig.servers) +
+    # `src/agents/bundle-mcp-config.ts` (loadMergedBundleMcpConfig reads
+    # `cfg.mcp.servers`). The gateway merges this catalog into the
+    # `/v1/chat/completions` agent loop on session start.
+    #
+    # We point at the same `/home/runtime/mcp-rockie/server.js` binary
+    # that the subscription paths register via Dockerfile.multitenant.
+    # mcp-rockie is stdio-only and reads ROCKIELAB_API_BASE,
+    # ROCKIELAB_TENANT_DEV_TOKEN, ROCKIELAB_API_PASSWORD from env. We
+    # set the env map explicitly (rather than relying on process-env
+    # inheritance) for parity with the subscription mcp.json payload.
+    #
+    # Only seed for `byok` (and `open-weights`, since both reach this
+    # branch). `jq --argjson` merges the block onto whatever the prior
+    # write produced — preserving the existing `gateway.mode` and
+    # `agents.defaults.model.primary` keys without clobbering.
+    MCP_ROCKIE_BIN="/home/runtime/mcp-rockie/server.js"
+    if [ -f "$MCP_ROCKIE_BIN" ]; then
+      # If no prior config was seeded (no BYOK_PROVIDER), start from {}.
+      if [ ! -f "$CONFIG_FILE" ]; then
+        mkdir -p "$CONFIG_DIR"
+        printf '%s' '{}' > "$CONFIG_FILE"
+        chmod 600 "$CONFIG_FILE"
+      fi
+      MCP_SERVERS_JSON=$(jq -n \
+        --arg bin "$MCP_ROCKIE_BIN" \
+        --arg api_base "${ROCKIELAB_API_BASE:-}" \
+        --arg tenant_token "${ROCKIELAB_TENANT_TOKEN:-}" \
+        --arg password "${OPEN_NOTEBOOK_PASSWORD:-}" \
+        '{
+          rockie: {
+            command: "node",
+            args: [$bin],
+            env: {
+              ROCKIELAB_API_BASE: $api_base,
+              ROCKIELAB_TENANT_DEV_TOKEN: $tenant_token,
+              ROCKIELAB_API_PASSWORD: $password
+            }
+          }
+        }')
+      TMP_CONFIG=$(mktemp)
+      if jq --argjson servers "$MCP_SERVERS_JSON" \
+            '.mcp = ((.mcp // {}) | .servers = ((.servers // {}) + $servers))' \
+            "$CONFIG_FILE" > "$TMP_CONFIG"; then
+        mv "$TMP_CONFIG" "$CONFIG_FILE"
+        chmod 600 "$CONFIG_FILE"
+        log "openclaw: seeded mcp.servers.rockie -> ${MCP_ROCKIE_BIN}"
+      else
+        rm -f "$TMP_CONFIG"
+        log "WARN: failed to merge mcp.servers.rockie into ${CONFIG_FILE}; BYOK chat agents will have no MCP tools"
+      fi
+    else
+      log "WARN: ${MCP_ROCKIE_BIN} not present; BYOK chat agents will have no MCP tools"
+    fi
+
     cd /app
     GATEWAY_ARGS=(--port "$OPENCLAW_PORT" --bind "$OPENCLAW_BIND" --host "$OPENCLAW_HOST")
     if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
