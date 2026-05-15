@@ -56,4 +56,12 @@ TENANT_WORKSPACE_DIR="$WORKSPACE_DIR" TENANT_LOG_DIR="$LOG_DIR" \
 export OPENCLAW_WORKSPACE_DIR="$WORKSPACE_DIR"
 export OPENCLAW_SKILLS_DIR="$SKILLS_DIR/skills"
 export PLATFORM_SKILLS_ROOT="$SKILLS_DIR"
-exec openclaw gateway --config "$RENDERED" --port "$TENANT_PORT"
+# The `openclaw gateway` CLI does NOT declare `--config`. The rendered
+# config path is delivered via the OPENCLAW_CONFIG_PATH env var, which
+# `resolveGatewayConfigPath` (src/config/paths.ts) reads at startup.
+# This mirrors the cascade-#4 pattern in overlay/multitenant/entrypoint.sh
+# — except multitenant writes to the gateway's default lookup path
+# ($HOME/.openclaw/openclaw.json) so it skips the export, whereas this
+# tenant flow renders to $TENANT_HOME/openclaw.json and MUST export.
+export OPENCLAW_CONFIG_PATH="$RENDERED"
+exec openclaw gateway --port "$TENANT_PORT"
