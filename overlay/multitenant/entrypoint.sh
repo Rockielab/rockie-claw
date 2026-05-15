@@ -88,13 +88,53 @@ case "$MODE" in
     fi
 
     cd /app
+
+    # Render the openclaw config so the gateway loads mcp-rockie at boot.
+    # The Commander definition for `openclaw gateway` (src/cli/gateway-cli/
+    # run.ts) does NOT declare a --config flag; the gateway reads
+    # $OPENCLAW_CONFIG_PATH (src/gateway/call.ts resolveGatewayConfigPath
+    # → src/config/paths.ts) instead. envsubst isn't installed in this
+    # image (Dockerfile.multitenant installs only jq+friends), so we
+    # render via `jq -n --arg` from a fixed env allowlist. If any of
+    # the four vars are unset, mcp-rockie spawns but tool calls return
+    # auth errors — that's distinct from "no tools loaded" (#24).
+    OPENCLAW_CFG_DIR=/home/runtime/.openclaw
+    OPENCLAW_CFG="$OPENCLAW_CFG_DIR/openclaw.json"
+    mkdir -p "$OPENCLAW_CFG_DIR"
+    jq -n \
+      --arg api_base "${ROCKIELAB_API_BASE:-}" \
+      --arg api_password "${ROCKIELAB_API_PASSWORD:-}" \
+      --arg notebook_password "${OPEN_NOTEBOOK_PASSWORD:-}" \
+      --arg tenant_token "${ROCKIELAB_TENANT_DEV_TOKEN:-}" \
+      '{
+        mcp: {
+          servers: {
+            rockie: {
+              command: "node",
+              args: ["/home/runtime/mcp-rockie/server.js"],
+              env: {
+                ROCKIELAB_API_BASE: $api_base,
+                ROCKIELAB_API_PASSWORD: $api_password,
+                OPEN_NOTEBOOK_PASSWORD: $notebook_password,
+                ROCKIELAB_TENANT_DEV_TOKEN: $tenant_token
+              }
+            }
+          }
+        }
+      }' > "$OPENCLAW_CFG"
+    export OPENCLAW_CONFIG_PATH="$OPENCLAW_CFG"
+    log "openclaw: rendered $OPENCLAW_CFG with $(jq '.mcp.servers | length' "$OPENCLAW_CFG") MCP servers; OPENCLAW_CONFIG_PATH exported"
+
     GATEWAY_ARGS=(--port "$OPENCLAW_PORT" --bind "$OPENCLAW_BIND")
     if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
       GATEWAY_ARGS+=(--token "$OPENCLAW_GATEWAY_TOKEN")
     else
       GATEWAY_ARGS+=(--auth none)
     fi
-    GATEWAY_ARGS+=(--allow-unconfigured)
+    # NOTE: --allow-unconfigured deliberately omitted — we now ship a
+    # rendered config via $OPENCLAW_CONFIG_PATH. If a future change
+    # reverts to --allow-unconfigured, scripts/check-multitenant-byok-config.mjs
+    # will fail in CI.
     exec node /app/dist/index.js gateway "${GATEWAY_ARGS[@]}"
     ;;
   *)

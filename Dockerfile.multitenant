@@ -214,7 +214,12 @@ COPY --from=skills-assembly --chown=runtime:runtime /work/home/.codex /home/runt
 # Drop in the multitenant overlay files (entrypoint + settings template).
 COPY --chown=root:root overlay/multitenant/entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --chown=runtime:runtime overlay/multitenant/settings.json.j2 /home/runtime/.claude/settings.json.j2
-RUN chmod 755 /usr/local/bin/entrypoint.sh
+# Schema-mirror for the openclaw config the entrypoint renders at boot in
+# byok/open-weights mode (see overlay/multitenant/entrypoint.sh). Not
+# consumed at runtime; checked in so a reviewer can grep mcp.servers and
+# see the shape without parsing the shell.
+COPY --chown=root:root overlay/multitenant/openclaw.example.json /usr/local/share/openclaw/openclaw.example.json
+RUN chmod 755 /usr/local/bin/entrypoint.sh && chmod 0644 /usr/local/share/openclaw/openclaw.example.json
 
 # Drop in the PTY-WebSocket broker binary built in stage 4b.
 COPY --from=broker-build /out/broker /usr/local/bin/broker

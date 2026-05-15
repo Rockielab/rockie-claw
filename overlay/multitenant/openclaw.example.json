@@ -1,0 +1,16 @@
+{
+  "mcp": {
+    "servers": {
+      "rockie": {
+        "command": "node",
+        "args": ["/home/runtime/mcp-rockie/server.js"],
+        "env": {
+          "ROCKIELAB_API_BASE": "https://api.example.invalid",
+          "ROCKIELAB_API_PASSWORD": "REPLACED_AT_BOOT",
+          "OPEN_NOTEBOOK_PASSWORD": "REPLACED_AT_BOOT",
+          "ROCKIELAB_TENANT_DEV_TOKEN": "REPLACED_AT_BOOT"
+        }
+      }
+    }
+  }
+}
