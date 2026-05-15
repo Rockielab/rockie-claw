@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""rockie-gpu — thin CLI over the Rockie platform GPU broker.
+
+Hits the platform-context HTTP surface under ``/api/gpu``. Subcommands:
+
+    list-prices   GET    /api/gpu/prices?gpu=&spot=&provider=
+    provision     POST   /api/gpu/provision     (JSON body)
+    status        GET    /api/gpu/pods/<id>/status?provider=
+    spent         GET    /api/gpu/spent
+    teardown      DELETE /api/gpu/pods/<id>?provider=
+
+Output: JSON-lines by default (one JSON object per line on stdout).
+Pass ``--human`` for k:v dicts and ascii-table lists.
+
+Exit codes:
+    0  success
+    1  network error / connection refused
+    3  HTTP 4xx (provider error, insufficient credits, etc.)
+    4  HTTP 5xx (provider outage, retryable)
+    2  argparse / usage error (argparse default)
+
+Env:
+    ROCKIELAB_PLATFORM_BASE_URL   default http://localhost:8000
+    ROCKIELAB_TENANT_TOKEN        bearer token for the platform auth header
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any, Optional
+
+
+PLATFORM_BASE_URL_DEFAULT = "http://localhost:8000"
+
+
+# ---------------------------------------------------------------------------
+# Error
+# ---------------------------------------------------------------------------
+
+
+class CLIError(Exception):
+    """Structured CLI error with a process exit code."""
+
+    def __init__(self, message: str, exit_code: int = 1):
+        super().__init__(message)
+        self.message = message
+        self.exit_code = exit_code
+
+
+# ---------------------------------------------------------------------------
+# HTTP — small urllib wrapper so tests can monkeypatch the whole layer
+# ---------------------------------------------------------------------------
+
+
+def _http(method: str, path: str, body: Optional[dict] = None) -> Any:
+    """Perform one HTTP call against ``ROCKIELAB_PLATFORM_BASE_URL``.
+
+    Returns the decoded JSON body (dict, list, or None for empty 204).
+    Raises :class:`CLIError` on any non-2xx; exit code is 1 for
+    transport errors, 3 for 4xx, 4 for 5xx.
+    """
+    base = os.environ.get("ROCKIELAB_PLATFORM_BASE_URL", PLATFORM_BASE_URL_DEFAULT)
+    url = base.rstrip("/") + path
+    data: Optional[bytes] = None
+    headers: dict[str, str] = {"Accept": "application/json"}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    token = os.environ.get("ROCKIELAB_TENANT_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            raw = resp.read()
+            if not raw:
+                return None
+            try:
+                return json.loads(raw.decode("utf-8"))
+            except ValueError:
+                return None
+    except urllib.error.HTTPError as e:
+        try:
+            payload = e.read().decode("utf-8")
+        except Exception:
+            payload = ""
+        if 400 <= e.code < 500:
+            raise CLIError(
+                f"HTTP {e.code}: {payload or e.reason}", exit_code=3
+            ) from e
+        raise CLIError(
+            f"HTTP {e.code}: {payload or e.reason}", exit_code=4
+        ) from e
+    except urllib.error.URLError as e:
+        raise CLIError(f"Network error: {e.reason}", exit_code=1) from e
+
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
+
+
+def _emit(payload: Any, human: bool) -> None:
+    """Print ``payload`` in JSON-lines (default) or human form."""
+    if payload is None:
+        return
+    if not human:
+        if isinstance(payload, list):
+            for row in payload:
+                print(json.dumps(row))
+        else:
+            print(json.dumps(payload))
+        return
+
+    # Human mode.
+    if isinstance(payload, dict):
+        for k, v in payload.items():
+            print(f"{k}: {v}")
+        return
+    if isinstance(payload, list):
+        if not payload:
+            return
+        # Assume list of dicts with consistent keys.
+        keys = list(payload[0].keys()) if isinstance(payload[0], dict) else []
+        if not keys:
+            for row in payload:
+                print(row)
+            return
+        widths = {
+            k: max(len(str(k)), max(len(str(r.get(k, ""))) for r in payload))
+            for k in keys
+        }
+        header = "  ".join(f"{k:<{widths[k]}}" for k in keys)
+        sep = "  ".join("-" * widths[k] for k in keys)
+        print(header)
+        print(sep)
+        for row in payload:
+            print("  ".join(f"{str(row.get(k, '')):<{widths[k]}}" for k in keys))
+        return
+    print(payload)
+
+
+# ---------------------------------------------------------------------------
+# Subcommand handlers
+# ---------------------------------------------------------------------------
+
+
+def _cmd_list_prices(args: argparse.Namespace) -> Any:
+    params: list[tuple[str, str]] = []
+    if args.gpu:
+        params.append(("gpu", args.gpu))
+    # Always send spot — the platform side defaults to False so being
+    # explicit keeps the wire-protocol predictable.
+    params.append(("spot", "true" if args.spot else "false"))
+    if args.provider:
+        params.append(("provider", args.provider))
+    query = urllib.parse.urlencode(params)
+    return _http("GET", f"/api/gpu/prices?{query}")
+
+
+def _cmd_provision(args: argparse.Namespace) -> Any:
+    body: dict[str, Any] = {
+        "gpu_type": args.gpu,
+        "hours": args.hours,
+        "spot": bool(args.spot),
+        "dry_run": bool(args.dry_run),
+    }
+    if args.provider:
+        body["provider"] = args.provider
+    return _http("POST", "/api/gpu/provision", body=body)
+
+
+def _cmd_status(args: argparse.Namespace) -> Any:
+    provider = args.provider or "runpod"
+    path = f"/api/gpu/pods/{args.pod_id}/status?provider={provider}"
+    return _http("GET", path)
+
+
+def _cmd_spent(args: argparse.Namespace) -> Any:
+    return _http("GET", "/api/gpu/spent")
+
+
+def _cmd_teardown(args: argparse.Namespace) -> Any:
+    provider = args.provider or "runpod"
+    path = f"/api/gpu/pods/{args.pod_id}?provider={provider}"
+    _http("DELETE", path)
+    # 204 returns None; surface a sentinel so the user sees something.
+    return {"state": "TORN_DOWN"}
+
+
+# ---------------------------------------------------------------------------
+# Parser
+# ---------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="rockie-gpu",
+        description="Manage GPU compute through the Rockie broker.",
+    )
+    parser.add_argument(
+        "--human",
+        action="store_true",
+        help="Pretty output (k: v dicts, ascii table for lists).",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_list = sub.add_parser("list-prices", help="Ranked unified price list.")
+    p_list.add_argument("--gpu", default=None, help="Filter by GPU type id.")
+    p_list.add_argument(
+        "--spot", action="store_true", help="Spot/preemptible quotes."
+    )
+    p_list.add_argument(
+        "--provider",
+        default=None,
+        help="Filter to a single provider (e.g. runpod, lambda).",
+    )
+    p_list.set_defaults(func=_cmd_list_prices)
+
+    p_prov = sub.add_parser("provision", help="Provision a GPU pod.")
+    p_prov.add_argument("--gpu", required=True, help="GPU type id.")
+    p_prov.add_argument(
+        "--hours", required=True, type=float, help="Estimated runtime hours."
+    )
+    p_prov.add_argument("--spot", action="store_true")
+    p_prov.add_argument("--dry-run", action="store_true")
+    p_prov.add_argument("--provider", default=None)
+    p_prov.set_defaults(func=_cmd_provision)
+
+    p_stat = sub.add_parser("status", help="Pod status.")
+    p_stat.add_argument("pod_id")
+    p_stat.add_argument("--provider", default=None)
+    p_stat.set_defaults(func=_cmd_status)
+
+    p_spent = sub.add_parser("spent", help="Current-period spend.")
+    p_spent.set_defaults(func=_cmd_spent)
+
+    p_tear = sub.add_parser("teardown", help="Terminate a pod.")
+    p_tear.add_argument("pod_id")
+    p_tear.add_argument("--provider", default=None)
+    p_tear.set_defaults(func=_cmd_teardown)
+
+    return parser
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main(argv: list[str]) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        result = args.func(args)
+    except CLIError as e:
+        print(e.message, file=sys.stderr)
+        return e.exit_code
+    _emit(result, human=bool(args.human))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
