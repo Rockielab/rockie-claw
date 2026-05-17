@@ -18,15 +18,23 @@ Subcommands:
   spent
   teardown    POD_ID [--provider P]
 
-Reads two env vars set by ``overlay/multitenant/entrypoint.sh``:
+Resolution order for the tenant token (first hit wins):
 
-  ROCKIELAB_API_BASE        — e.g. https://api.rockielab.com
-  ROCKIELAB_TENANT_TOKEN    — passed as X-Tenant-Token
+  1. ``ROCKIELAB_TENANT_TOKEN`` env var (canonical; set by the per-tenant
+     runtime image's ``overlay/multitenant/entrypoint.sh``)
+  2. ``BROKER_TENANT_TOKEN`` env var (legacy alias; still honored)
+  3. ``~/.rockie/config.json`` key ``tenant_token`` (local-shell install)
+  4. error (exit code 2 — same class as "bad argv / usage error")
+
+Same ladder for the API base URL:
+
+  ROCKIELAB_API_BASE env → ``~/.rockie/config.json`` key ``api_base`` →
+  ``API_BASE_DEFAULT`` (``https://api.rockielab.com``).
 
 Exit codes:
   0   success
   1   network / API error
-  2   bad argv / usage error
+  2   bad argv / usage error / missing tenant token
   3   server returned HTTP 4xx (auth, validation, insufficient credit)
   4   server returned HTTP 5xx (provider outage)
 """
@@ -40,17 +48,16 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Optional
 
 
-DEFAULT_API_BASE = os.environ.get(
-    "ROCKIELAB_API_BASE", "https://api.rockielab.com"
-)
-TENANT_TOKEN = os.environ.get("ROCKIELAB_TENANT_TOKEN", "")
+API_BASE_DEFAULT = "https://api.rockielab.com"
+CONFIG_PATH_DEFAULT = "~/.rockie/config.json"
 
 
 # ---------------------------------------------------------------------------
-# HTTP helper — stdlib only so we don't drag pip deps into the runtime image
+# Config / credential resolution
 # ---------------------------------------------------------------------------
 
 
@@ -60,13 +67,67 @@ class CLIError(Exception):
         self.exit_code = exit_code
 
 
+def _load_local_config(path: str = CONFIG_PATH_DEFAULT) -> dict:
+    """Return the parsed ``~/.rockie/config.json`` dict, or ``{}`` if
+    the file is missing, unreadable, or not valid JSON. Malformed JSON
+    emits a warning to stderr but does not raise — the env-var path
+    must still work even when the config file is broken."""
+    expanded = Path(os.path.expanduser(path))
+    if not expanded.is_file():
+        return {}
+    try:
+        with expanded.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as e:
+        sys.stderr.write(
+            f"rockie-gpu: warning: could not read {expanded}: {e}\n"
+        )
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _get_token() -> str:
+    """Resolve the tenant token. Raises ``CLIError`` with exit code 2
+    when no source is set (same class as argparse usage errors —
+    "you need to configure auth before this CLI can do anything")."""
+    tok = os.environ.get("ROCKIELAB_TENANT_TOKEN") or os.environ.get(
+        "BROKER_TENANT_TOKEN"
+    )
+    if tok:
+        return tok
+    cfg = _load_local_config()
+    tok = cfg.get("tenant_token")
+    if tok:
+        return tok
+    raise CLIError(
+        "no tenant token configured — set ROCKIELAB_TENANT_TOKEN, "
+        "BROKER_TENANT_TOKEN, or write ~/.rockie/config.json with "
+        "{\"tenant_token\": \"t-...\"}",
+        exit_code=2,
+    )
+
+
+def _get_api_base() -> str:
+    base = os.environ.get("ROCKIELAB_API_BASE")
+    if base:
+        return base
+    cfg = _load_local_config()
+    return cfg.get("api_base") or API_BASE_DEFAULT
+
+
+# ---------------------------------------------------------------------------
+# HTTP helper — stdlib only so we don't drag pip deps into the runtime image
+# ---------------------------------------------------------------------------
+
+
 def _build_request(
     method: str, path: str, body: Optional[dict]
 ) -> urllib.request.Request:
-    url = f"{DEFAULT_API_BASE.rstrip('/')}{path}"
-    headers = {"Accept": "application/json"}
-    if TENANT_TOKEN:
-        headers["X-Tenant-Token"] = TENANT_TOKEN
+    url = f"{_get_api_base().rstrip('/')}{path}"
+    headers = {
+        "Accept": "application/json",
+        "X-Tenant-Token": _get_token(),
+    }
     data: Optional[bytes] = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
