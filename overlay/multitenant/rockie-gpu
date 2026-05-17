@@ -19,9 +19,9 @@ Exit codes:
     4  HTTP 5xx (provider outage, retryable)
     2  argparse / usage error (argparse default)
 
-Env:
-    ROCKIELAB_PLATFORM_BASE_URL   default http://localhost:8000
-    ROCKIELAB_TENANT_TOKEN        bearer token for the platform auth header
+Env (set by overlay/multitenant/entrypoint.sh in production):
+    ROCKIELAB_API_BASE     default http://localhost:8000  (e.g. https://api.rockielab.com)
+    BROKER_TENANT_TOKEN    dev-token forwarded as X-Tenant-Token header
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ import urllib.request
 from typing import Any, Optional
 
 
-PLATFORM_BASE_URL_DEFAULT = "http://localhost:8000"
+API_BASE_DEFAULT = "http://localhost:8000"
 
 
 # ---------------------------------------------------------------------------
@@ -59,22 +59,22 @@ class CLIError(Exception):
 
 
 def _http(method: str, path: str, body: Optional[dict] = None) -> Any:
-    """Perform one HTTP call against ``ROCKIELAB_PLATFORM_BASE_URL``.
+    """Perform one HTTP call against ``ROCKIELAB_API_BASE``.
 
     Returns the decoded JSON body (dict, list, or None for empty 204).
     Raises :class:`CLIError` on any non-2xx; exit code is 1 for
     transport errors, 3 for 4xx, 4 for 5xx.
     """
-    base = os.environ.get("ROCKIELAB_PLATFORM_BASE_URL", PLATFORM_BASE_URL_DEFAULT)
+    base = os.environ.get("ROCKIELAB_API_BASE", API_BASE_DEFAULT)
     url = base.rstrip("/") + path
     data: Optional[bytes] = None
     headers: dict[str, str] = {"Accept": "application/json"}
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    token = os.environ.get("ROCKIELAB_TENANT_TOKEN")
+    token = os.environ.get("BROKER_TENANT_TOKEN")
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        headers["X-Tenant-Token"] = token
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
