@@ -292,6 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_prices = sub.add_parser(
         "list-prices",
+        aliases=["list"],
         help="List ranked GPU prices across all configured providers.",
     )
     p_prices.add_argument("--gpu", help="Filter by gpu_type (e.g. A100_80GB).")
