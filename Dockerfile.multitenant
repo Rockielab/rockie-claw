@@ -203,6 +203,32 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages \
 RUN command -v hf && hf --version && \
     python3 -c "import huggingface_hub; print('huggingface_hub', huggingface_hub.__version__)"
 
+# ── rockie-workspace#457: forbid local torch/triton/tensorflow/jax ──
+# Tenant Fly machines are small/cheap and cannot host inference workloads.
+# GPU work routes via Rockie's /experiment skill (POST $ROCKIELAB_API_URL/api/jobs/submit)
+# which provisions on RunPod and tracks spend through gpu_spend. Stub the
+# top-level import paths so any `import torch` (etc.) raises immediately with
+# a pointer to the sanctioned path. Defence-in-depth alongside the
+# orchestrator-side role-pre-bash-guard.sh torch/triton block (PR #502, #427).
+RUN STUB_DIR="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    test -n "$STUB_DIR" && \
+    for pkg in torch triton tensorflow jax; do \
+      mkdir -p "$STUB_DIR/$pkg" && \
+      printf 'raise ImportError("Local %s is forbidden on the Rockie runtime. Dispatch GPU work via $ROCKIELAB_API_URL/api/jobs/submit. See platform-skills/skills/experiment/SKILL.md. (rockie-workspace#457)")\n' "$pkg" > "$STUB_DIR/$pkg/__init__.py"; \
+    done && \
+    python3 - <<'PY'
+import sys
+for pkg in ("torch", "triton", "tensorflow", "jax"):
+    try:
+        __import__(pkg)
+    except ImportError as exc:
+        if "#457" not in str(exc):
+            sys.exit(f"STUB VERIFY FAILED for {pkg}: message missing #457 marker")
+        print(f"{pkg} stub OK")
+        continue
+    sys.exit(f"STUB VERIFY FAILED for {pkg}: import did not raise")
+PY
+
 # Install official claude and codex CLIs globally via npm.
 # Both are published as npm packages; @anthropic-ai/claude-code is the
 # canonical name for the Claude Code CLI and @openai/codex is the canonical
