@@ -79,4 +79,35 @@ describe("exec platform secret runtime", () => {
       }),
     ).rejects.toThrow(/Secret references are only allowed in exact broker-native form/);
   });
+
+  it("rejects platform-secret sandbox commands before backend materialization", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          known: { DEPLOY_KEY: { category: "ssh_key" } },
+          unknown: [],
+        }),
+      ),
+    );
+    const buildExecSpec = vi.fn();
+    const tool = createExecTool({
+      host: "sandbox",
+      security: "full",
+      ask: "off",
+      sandbox: {
+        containerName: "ssh-sandbox",
+        workspaceDir: process.cwd(),
+        containerWorkdir: "/workspace",
+        buildExecSpec,
+      },
+    });
+
+    await expect(
+      tool.execute("secret-ssh-reject", {
+        command: "printf %s $DEPLOY_KEY",
+      }),
+    ).rejects.toThrow(/Secret references are only allowed in exact broker-native form/);
+    expect(buildExecSpec).not.toHaveBeenCalled();
+  });
 });

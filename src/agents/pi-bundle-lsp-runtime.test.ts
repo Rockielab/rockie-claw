@@ -82,6 +82,10 @@ function configureSingleLspServer(): void {
       typescript: {
         command: "typescript-language-server",
         args: ["--stdio"],
+        env: {
+          LANG: "C.UTF-8",
+          OPENAI_API_KEY: "config-secret",
+        },
       },
     },
     diagnostics: [],
@@ -121,7 +125,7 @@ describe("bundle LSP runtime", () => {
       expect.objectContaining({
         detached: process.platform !== "win32",
         env: expect.objectContaining({
-          LANG: "en_US.UTF-8",
+          LANG: "C.UTF-8",
         }),
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: process.platform === "win32",

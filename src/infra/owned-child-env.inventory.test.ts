@@ -5,9 +5,111 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const SCAN_ROOTS = ["src/agents", "src/process", "src/infra"] as const;
+const SCAN_ROOT = "src";
 const CHILD_PROCESS_METHODS = new Set(["spawn", "execFile", "exec", "fork"]);
 const REVIEWED_EXEMPTION_RE = /owned-child-env:\s*reviewed non-owned\b/;
+const REVIEWED_NON_OWNED_EXEMPTIONS = new Map<string, string>([
+  [
+    "src/acp/client.ts:143:spawn",
+    "ACP client launches caller-selected ACP stdio servers with an ACP-specific env strip list.",
+  ],
+  [
+    "src/cli/proxy-cli.runtime.ts:107:spawn",
+    "Debug proxy CLI runs the user command with proxy env overlays, not as a broker-owned runtime child.",
+  ],
+  [
+    "src/cli/update-cli/restart-helper.ts:398:spawn",
+    "Detached restart script must outlive the updater process and is service-management, not runtime execution.",
+  ],
+  [
+    "src/cli/update-cli/update-command.ts:1615:spawn",
+    "Windows taskkill cleanup targets an updater child and carries no runtime secret surface.",
+  ],
+  [
+    "src/cli/update-cli/update-command.ts:1659:spawn",
+    "Post-core update handoff respawns the CLI with updater-specific env continuity.",
+  ],
+  [
+    "src/commands/doctor-cron.ts:141:execFile",
+    "Doctor command reads the user's crontab for diagnostics.",
+  ],
+  [
+    "src/commands/doctor-gateway-services.ts:227:execFile",
+    "Doctor cleanup invokes launchctl service-management commands.",
+  ],
+  [
+    "src/commands/doctor-gateway-services.ts:228:execFile",
+    "Doctor cleanup invokes launchctl service-management commands.",
+  ],
+  [
+    "src/commands/doctor-platform-notes.ts:40:execFile",
+    "Doctor notes inspect launchctl environment state.",
+  ],
+  [
+    "src/crestodian/probes.ts:20:spawn",
+    "Local availability probe for user-visible command diagnostics.",
+  ],
+  [
+    "src/daemon/exec-file.ts:11:execFile",
+    "Daemon helper executes caller-supplied service-management commands with caller options.",
+  ],
+  [
+    "src/daemon/launchd-restart-handoff.ts:204:spawn",
+    "Launchd restart handoff uses host-service env sanitization, not broker runtime env ownership.",
+  ],
+  [
+    "src/daemon/schtasks.ts:328:spawn",
+    "Windows scheduled task fallback preserves the task's configured environment for service restart.",
+  ],
+  [
+    "src/daemon/schtasks.ts:342:spawn",
+    "Windows scheduled task script launch is service-management restart plumbing.",
+  ],
+  [
+    "src/entry.ts:115:spawn",
+    "CLI self-respawn uses a precomputed replacement process environment.",
+  ],
+  [
+    "src/gateway/live-agent-probes.ts:115:execFile",
+    "Live-agent probe runs the OpenClaw CLI under a diagnostic env supplied by the caller.",
+  ],
+  [
+    "src/gateway/server-methods/config.ts:163:execFile",
+    "Config-open helper launches the platform opener for user interaction.",
+  ],
+  [
+    "src/hooks/gmail-ops.ts:361:spawn",
+    "Gmail hook operation launches the user's gog integration process.",
+  ],
+  [
+    "src/hooks/gmail-watcher.ts:67:spawn",
+    "Gmail watcher supervises the user's gog integration process.",
+  ],
+  [
+    "src/infra/process-respawn.ts:27:spawn",
+    "Self-respawn intentionally preserves the current process environment for process replacement.",
+  ],
+  [
+    "src/node-host/invoke.ts:152:spawn",
+    "Node-host invocation executes a caller-specified command/env on the remote node host.",
+  ],
+  [
+    "src/proxy-capture/ca.ts:23:execFile",
+    "Debug proxy certificate generation invokes the trusted openssl binary for local tooling setup.",
+  ],
+  [
+    "src/secrets/resolve.ts:453:spawn",
+    "Exec secret providers run with explicit provider-configured env, not inherited process env.",
+  ],
+  [
+    "src/tui/tui-launch.ts:101:spawn",
+    "TUI launch is an interactive CLI handoff preserving configured TUI auth env.",
+  ],
+  [
+    "src/tui/tui.ts:886:spawn",
+    "Interactive auth login launches the user's local auth CLI with terminal stdio.",
+  ],
+]);
 
 type ChildProcessCall = {
   relPath: string;
@@ -49,7 +151,7 @@ function walkTypescriptFiles(root: string): string[] {
 }
 
 function collectProductionSourceFiles(): string[] {
-  return SCAN_ROOTS.flatMap((root) => walkTypescriptFiles(path.join(repoRoot, root))).sort();
+  return walkTypescriptFiles(path.join(repoRoot, SCAN_ROOT)).sort();
 }
 
 function readSource(relPath: string): string {
@@ -164,7 +266,10 @@ function collectChildProcessCalls(relPath: string, source: string): ChildProcess
 }
 
 function hasReviewedExemption(call: ChildProcessCall): boolean {
-  return REVIEWED_EXEMPTION_RE.test(call.context);
+  return (
+    REVIEWED_NON_OWNED_EXEMPTIONS.has(formatCallLocation(call)) ||
+    REVIEWED_EXEMPTION_RE.test(call.context)
+  );
 }
 
 function hasExplicitEnv(call: ChildProcessCall): boolean {
@@ -183,6 +288,10 @@ function hasOwnedEnvEvidence(call: ChildProcessCall): boolean {
   );
 }
 
+function formatCallLocation(call: ChildProcessCall): string {
+  return `${call.relPath}:${call.line}:${call.callee}`;
+}
+
 describe("owned child process env inventory", () => {
   it("covers every production child_process spawn/exec/fork site with owned env or reviewed exemption", () => {
     const calls = collectProductionSourceFiles().flatMap((fullPath) => {
@@ -190,13 +299,34 @@ describe("owned child process env inventory", () => {
       return collectChildProcessCalls(relPath, fs.readFileSync(fullPath, "utf8"));
     });
 
-    expect(calls.map((call) => `${call.relPath}:${call.line}:${call.callee}`).sort()).toEqual([
+    const callLocations = calls.map(formatCallLocation).sort();
+    expect(callLocations).toEqual([
+      "src/acp/client.ts:143:spawn",
       "src/agents/mcp-stdio-transport.ts:60:spawn",
       "src/agents/pi-bundle-lsp-runtime.ts:69:spawn",
       "src/agents/sandbox/docker.ts:74:spawn",
-      "src/agents/sandbox/ssh.ts:340:spawn",
-      "src/agents/sandbox/ssh.ts:393:spawn",
-      "src/agents/sandbox/ssh.ts:398:spawn",
+      "src/agents/sandbox/ssh.ts:395:spawn",
+      "src/agents/sandbox/ssh.ts:451:spawn",
+      "src/agents/sandbox/ssh.ts:456:spawn",
+      "src/auto-reply/reply/stage-sandbox-media.ts:316:spawn",
+      "src/cli/proxy-cli.runtime.ts:107:spawn",
+      "src/cli/update-cli/restart-helper.ts:398:spawn",
+      "src/cli/update-cli/update-command.ts:1615:spawn",
+      "src/cli/update-cli/update-command.ts:1659:spawn",
+      "src/commands/doctor-cron.ts:141:execFile",
+      "src/commands/doctor-gateway-services.ts:227:execFile",
+      "src/commands/doctor-gateway-services.ts:228:execFile",
+      "src/commands/doctor-platform-notes.ts:40:execFile",
+      "src/crestodian/probes.ts:20:spawn",
+      "src/daemon/exec-file.ts:11:execFile",
+      "src/daemon/launchd-restart-handoff.ts:204:spawn",
+      "src/daemon/schtasks.ts:328:spawn",
+      "src/daemon/schtasks.ts:342:spawn",
+      "src/entry.ts:115:spawn",
+      "src/gateway/live-agent-probes.ts:115:execFile",
+      "src/gateway/server-methods/config.ts:163:execFile",
+      "src/hooks/gmail-ops.ts:361:spawn",
+      "src/hooks/gmail-watcher.ts:67:spawn",
       "src/infra/fs-pinned-path-helper.ts:146:spawn",
       "src/infra/fs-pinned-write-helper.ts:163:spawn",
       "src/infra/machine-name.ts:13:execFile",
@@ -205,11 +335,22 @@ describe("owned child process env inventory", () => {
       "src/infra/ssh-tunnel.ts:156:spawn",
       "src/infra/tls/gateway.ts:52:execFile",
       "src/infra/windows-task-restart.ts:83:spawn",
+      "src/media/ffmpeg-exec.ts:51:execFile",
+      "src/media/ffmpeg-exec.ts:60:execFile",
+      "src/media/ffmpeg-exec.ts:87:execFile",
+      "src/node-host/invoke.ts:152:spawn",
       "src/process/exec.ts:160:execFile",
       "src/process/exec.ts:298:spawn",
       "src/process/exec.ts:348:spawn",
       "src/process/kill-tree.ts:103:spawn",
+      "src/proxy-capture/ca.ts:23:execFile",
+      "src/secrets/resolve.ts:453:spawn",
+      "src/tui/tui-launch.ts:101:spawn",
+      "src/tui/tui.ts:886:spawn",
     ]);
+    expect([...REVIEWED_NON_OWNED_EXEMPTIONS.keys()].sort()).toEqual(
+      callLocations.filter((location) => REVIEWED_NON_OWNED_EXEMPTIONS.has(location)),
+    );
     expect(readSource("src/process/spawn-utils.ts")).toContain(
       'assertOwnedChildEnv(options.env, "spawnWithFallback")',
     );

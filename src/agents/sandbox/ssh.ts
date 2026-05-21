@@ -6,7 +6,10 @@ import { resolveBoundaryPath } from "../../infra/boundary-path.js";
 import { buildOwnedChildEnv, containsSecretValueInArgv } from "../../infra/owned-child-env.js";
 import { parseSshTarget } from "../../infra/ssh-tunnel.js";
 import { resolvePreferredOpenClawTmpDir } from "../../infra/tmp-openclaw-dir.js";
-import { createRuntimeSecretRedactor } from "../../secrets/platform-runtime.js";
+import {
+  createRuntimeSecretRedactor,
+  type SecretCategory,
+} from "../../secrets/platform-runtime.js";
 import { resolveUserPath } from "../../utils.js";
 import type { SandboxBackendCommandResult } from "./backend-handle.types.js";
 import { sanitizeEnvVars } from "./sanitize-env-vars.js";
@@ -20,6 +23,7 @@ export type SshSandboxSettings = {
   certificateFile?: string;
   knownHostsFile?: string;
   identityData?: string;
+  identityDataCategory?: SecretCategory;
   certificateData?: string;
   knownHostsData?: string;
 };
@@ -105,6 +109,52 @@ function buildSshFailureMessage(stderr: string, exitCode?: number): string {
       ? `ssh exited with code ${exitCode}`
       : "ssh exited with a non-zero status")
   );
+}
+
+type RuntimeSecretRedactor = ReturnType<typeof createRuntimeSecretRedactor>;
+
+function redactBuffer(buffer: Buffer, redactor: RuntimeSecretRedactor | null): Buffer {
+  if (!redactor) {
+    return buffer;
+  }
+  return Buffer.from(redactor.redact(buffer.toString("utf8")), "utf8");
+}
+
+function redactErrorOutputValue(value: unknown, redactor: RuntimeSecretRedactor): unknown {
+  if (Buffer.isBuffer(value)) {
+    return redactBuffer(value, redactor);
+  }
+  if (typeof value === "string") {
+    return redactor.redact(value);
+  }
+  return redactor.redactUnknown(value);
+}
+
+function redactSshError(error: unknown, redactor: RuntimeSecretRedactor | null): unknown {
+  if (!redactor) {
+    return error;
+  }
+  if (error instanceof Error) {
+    error.message = redactor.redact(error.message);
+    const record = error as Error & { stdout?: unknown; stderr?: unknown };
+    if (record.stdout !== undefined) {
+      record.stdout = redactErrorOutputValue(record.stdout, redactor);
+    }
+    if (record.stderr !== undefined) {
+      record.stderr = redactErrorOutputValue(record.stderr, redactor);
+    }
+    return error;
+  }
+  return redactor.redactUnknown(error);
+}
+
+function requireSshIdentityDataCategory(category: SecretCategory | undefined): SecretCategory {
+  if (!category) {
+    throw new Error(
+      "SSH identityData requires resolve-v2 category metadata before materialization. Use identityFile for path-based SSH identities until a platform-secret ssh_key path is wired.",
+    );
+  }
+  return category;
 }
 
 export function shellEscape(value: string): string {
@@ -259,7 +309,7 @@ export async function createSshSandboxSessionFromSettings(
       ? await writeResolvedSshKeyTempfile({
           dir: configDir,
           value: settings.identityData,
-          category: "ssh_key",
+          category: requireSshIdentityDataCategory(settings.identityDataCategory),
         })
       : undefined;
     const materializedCertificate = settings.certificateData
@@ -333,41 +383,49 @@ export async function runSshSandboxCommand(
   });
   assertNoSecretValuesInArgv(argv, params.secretValues);
   const sshEnv = sanitizeEnvVars(buildOwnedChildEnv()).allowed;
-  return await new Promise<SandboxBackendCommandResult>((resolve, reject) => {
-    const child = spawn(argv[0], argv.slice(1), {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: sshEnv,
-      signal: params.signal,
-    });
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
+  const redactor =
+    params.secretValues && Object.keys(params.secretValues).length > 0
+      ? createRuntimeSecretRedactor(params.secretValues)
+      : null;
+  try {
+    return await new Promise<SandboxBackendCommandResult>((resolve, reject) => {
+      const child = spawn(argv[0], argv.slice(1), {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: sshEnv,
+        signal: params.signal,
+      });
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
 
-    child.stdout.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
-    child.stderr.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      const stdout = Buffer.concat(stdoutChunks);
-      const stderr = Buffer.concat(stderrChunks);
-      const exitCode = code ?? 0;
-      if (exitCode !== 0 && !params.allowFailure) {
-        reject(
-          Object.assign(new Error(buildSshFailureMessage(stderr.toString("utf8"), exitCode)), {
-            code: exitCode,
-            stdout,
-            stderr,
-          }),
-        );
+      child.stdout.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+      child.stderr.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
+      child.on("error", (error) => reject(redactSshError(error, redactor)));
+      child.on("close", (code) => {
+        const stdout = redactBuffer(Buffer.concat(stdoutChunks), redactor);
+        const stderr = redactBuffer(Buffer.concat(stderrChunks), redactor);
+        const exitCode = code ?? 0;
+        if (exitCode !== 0 && !params.allowFailure) {
+          reject(
+            Object.assign(new Error(buildSshFailureMessage(stderr.toString("utf8"), exitCode)), {
+              code: exitCode,
+              stdout,
+              stderr,
+            }),
+          );
+          return;
+        }
+        resolve({ stdout, stderr, code: exitCode });
+      });
+
+      if (params.stdin !== undefined) {
+        child.stdin.end(params.stdin);
         return;
       }
-      resolve({ stdout, stderr, code: exitCode });
+      child.stdin.end();
     });
-
-    if (params.stdin !== undefined) {
-      child.stdin.end(params.stdin);
-      return;
-    }
-    child.stdin.end();
-  });
+  } finally {
+    redactor?.close();
+  }
 }
 
 export async function uploadDirectoryToSshTarget(params: {
@@ -524,7 +582,7 @@ async function writeSecretMaterial(
 export async function writeResolvedSshKeyTempfile(params: {
   dir: string;
   value: string;
-  category: string;
+  category: SecretCategory;
 }): Promise<string> {
   if (params.category !== "ssh_key") {
     throw new Error("SSH key material requires secret category ssh_key.");

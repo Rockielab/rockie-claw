@@ -210,6 +210,44 @@ describe("ssh subprocess env sanitization", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
+  it("redacts rejected ssh command errors and attached output", async () => {
+    spawnMock.mockImplementationOnce(
+      (_command: string, _args: readonly string[], _options: SpawnOptions): ChildProcess => {
+        const child = createMockChildProcess();
+        process.nextTick(() => {
+          child.stdout.write("stdout CANARY_SECRET_VALUE\n");
+          child.stderr.write("stderr CANARY_SECRET_VALUE\n");
+          child.emit("close", 1);
+        });
+        return child as unknown as ChildProcess;
+      },
+    );
+
+    let rejected: unknown;
+    try {
+      await runSshSandboxCommand({
+        session: {
+          command: "ssh",
+          configPath: "/tmp/openclaw-test-ssh-config",
+          host: "openclaw-sandbox",
+        },
+        remoteCommand: "true",
+        secretValues: { DEPLOY_KEY: "CANARY_SECRET_VALUE" },
+      });
+    } catch (error) {
+      rejected = error;
+    }
+
+    expect(rejected).toBeInstanceOf(Error);
+    const error = rejected as Error & { stdout?: Buffer; stderr?: Buffer };
+    expect(error.message).toContain("<redacted:DEPLOY_KEY>");
+    expect(error.message).not.toContain("CANARY_SECRET_VALUE");
+    expect(error.stdout?.toString("utf8")).toContain("<redacted:DEPLOY_KEY>");
+    expect(error.stdout?.toString("utf8")).not.toContain("CANARY_SECRET_VALUE");
+    expect(error.stderr?.toString("utf8")).toContain("<redacted:DEPLOY_KEY>");
+    expect(error.stderr?.toString("utf8")).not.toContain("CANARY_SECRET_VALUE");
+  });
+
   it("gates resolved ssh key tempfiles on ssh_key category and writes 0600", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-ssh-key-category-"));
     tempDirs.push(dir);

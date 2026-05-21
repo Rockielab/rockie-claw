@@ -68,7 +68,7 @@ function delay(ms: number): Promise<void> {
 function spawnLspServerProcess(config: StdioMcpServerLaunchConfig): ChildProcess {
   return spawn(config.command, config.args ?? [], {
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...buildOwnedChildEnv(), ...config.env },
+    env: buildOwnedChildEnv({ overrides: config.env }),
     cwd: config.cwd,
     detached: process.platform !== "win32",
     windowsHide: process.platform === "win32",
