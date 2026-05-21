@@ -60,18 +60,10 @@ log() {
 }
 
 # Render /home/runtime/.claude/settings.json.j2 → settings.json with the
-# tenant/lab/target-dir placeholders substituted. The template lives at
-# /home/runtime/.claude/settings.json.j2 and declares PLATFORM_LAB_ID +
-# PLATFORM_TENANT_ID + PLATFORM_TARGET_DIR env vars that downstream
-# subscription CLIs (claude / codex) consume via the `env` block.
-#
-# We use plain `sed` (no new image deps) with `|` as the delimiter so
-# TARGET_DIR (a path) doesn't collide with the substitution syntax.
-# Missing env vars substitute to empty + log a WARN; we do NOT exit
-# nonzero — byok / dev environments may legitimately not have LAB_ID
-# until the fly_provisioning_service follow-up wires it (see spec
-# specs/runtime-platform-lab-id-env-2026-05-21.md). The function is
-# idempotent — running it twice produces the same output.
+# tenant/lab/target-dir placeholders substituted. Missing env vars are
+# best-effort: log a WARN, substitute empty, do NOT exit (byok/dev may
+# not have LAB_ID until fly_provisioning_service is updated; see
+# specs/runtime-platform-lab-id-env-2026-05-21.md).
 render_settings_json() {
   local template="/home/runtime/.claude/settings.json.j2"
   local output="/home/runtime/.claude/settings.json"
@@ -82,26 +74,25 @@ render_settings_json() {
   local lab_id="${PLATFORM_LAB_ID:-${LAB_ID:-}}"
   local tenant_id="${ROCKIELAB_TENANT_ID:-}"
   local target_dir="${PLATFORM_TARGET_DIR:-${TARGET_DIR:-/home/runtime}}"
-  if [ -z "$lab_id" ]; then
-    log "WARN: settings.json.j2 render: LAB_ID unset, substituting empty"
-  fi
-  if [ -z "$tenant_id" ]; then
-    log "WARN: settings.json.j2 render: TENANT_ID unset, substituting empty"
-  fi
-  if [ -z "$target_dir" ]; then
-    log "WARN: settings.json.j2 render: TARGET_DIR unset, substituting empty"
-  fi
+  for var in lab_id tenant_id target_dir; do
+    if [ -z "${!var}" ]; then
+      log "WARN: settings.json.j2 render: ${var} unset, substituting empty"
+    fi
+  done
+  # Escape sed metachars (\, &, |) so a future provisioner passing a
+  # path like /srv/work&prod can't corrupt the rendered JSON. `|` is
+  # our delimiter — escape it too.
+  local esc='s/[\&|]/\\&/g'
   mkdir -p "$(dirname "$output")"
   sed \
-    -e "s|{{ LAB_ID }}|${lab_id}|g" \
-    -e "s|{{ TENANT_ID }}|${tenant_id}|g" \
-    -e "s|{{ TARGET_DIR }}|${target_dir}|g" \
+    -e "s|{{ LAB_ID }}|$(printf '%s' "$lab_id" | sed -e "$esc")|g" \
+    -e "s|{{ TENANT_ID }}|$(printf '%s' "$tenant_id" | sed -e "$esc")|g" \
+    -e "s|{{ TARGET_DIR }}|$(printf '%s' "$target_dir" | sed -e "$esc")|g" \
     "$template" > "$output"
-  if command -v python3 >/dev/null 2>&1; then
-    if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$output" 2>/dev/null; then
-      log "WARN: settings.json.j2 render: ${output} failed JSON validation; continuing"
-      return 0
-    fi
+  if command -v python3 >/dev/null 2>&1 && \
+     ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$output" 2>/dev/null; then
+    log "WARN: settings.json.j2 render: ${output} failed JSON validation; continuing"
+    return 0
   fi
   log "settings.json rendered → ${output} (lab=${lab_id:-<empty>}, tenant=${tenant_id:-<empty>}, target=${target_dir:-<empty>})"
 }

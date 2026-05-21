@@ -147,7 +147,7 @@ def test_missing_lab_id_warns_and_continues(tmp_path: Path, claude_dir: Path) ->
         f"render_settings_json must not exit nonzero when LAB_ID is unset.\n"
         f"stderr:\n{result.stderr}"
     )
-    assert "LAB_ID unset" in result.stderr, result.stderr
+    assert "lab_id unset" in result.stderr, result.stderr
     output = claude_dir / "settings.json"
     assert output.exists()
     data = json.loads(output.read_text(encoding="utf-8"))
@@ -182,6 +182,27 @@ def test_target_dir_defaults_to_home_runtime(tmp_path: Path, claude_dir: Path) -
 # Idempotency — re-running on an already-rendered settings.json produces
 # the same content, byte for byte.
 # ---------------------------------------------------------------------------
+
+
+def test_sed_metachars_in_values_do_not_corrupt_output(
+    tmp_path: Path, claude_dir: Path
+) -> None:
+    """A future provisioner could pass a TARGET_DIR with `&` or `|` or
+    `\\` — sed would otherwise treat these as metachars and corrupt the
+    rendered JSON. Verifies the escape pass."""
+    result = _run_render(
+        tmp_path,
+        {
+            "PLATFORM_LAB_ID": "l-a&b",
+            "ROCKIELAB_TENANT_ID": "t-c|d",
+            "PLATFORM_TARGET_DIR": "/srv/work&prod",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads((claude_dir / "settings.json").read_text(encoding="utf-8"))
+    assert data["env"]["PLATFORM_LAB_ID"] == "l-a&b"
+    assert data["env"]["PLATFORM_TENANT_ID"] == "t-c|d"
+    assert data["env"]["PLATFORM_TARGET_DIR"] == "/srv/work&prod"
 
 
 def test_render_is_idempotent(tmp_path: Path, claude_dir: Path) -> None:
