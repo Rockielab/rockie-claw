@@ -59,11 +59,61 @@ log() {
   printf '[entrypoint] %s\n' "$*" >&2
 }
 
+# Render /home/runtime/.claude/settings.json.j2 → settings.json with the
+# tenant/lab/target-dir placeholders substituted. The template lives at
+# /home/runtime/.claude/settings.json.j2 and declares PLATFORM_LAB_ID +
+# PLATFORM_TENANT_ID + PLATFORM_TARGET_DIR env vars that downstream
+# subscription CLIs (claude / codex) consume via the `env` block.
+#
+# We use plain `sed` (no new image deps) with `|` as the delimiter so
+# TARGET_DIR (a path) doesn't collide with the substitution syntax.
+# Missing env vars substitute to empty + log a WARN; we do NOT exit
+# nonzero — byok / dev environments may legitimately not have LAB_ID
+# until the fly_provisioning_service follow-up wires it (see spec
+# specs/runtime-platform-lab-id-env-2026-05-21.md). The function is
+# idempotent — running it twice produces the same output.
+render_settings_json() {
+  local template="/home/runtime/.claude/settings.json.j2"
+  local output="/home/runtime/.claude/settings.json"
+  if [ ! -f "$template" ]; then
+    log "WARN: settings.json.j2 render: template ${template} not present; skipping"
+    return 0
+  fi
+  local lab_id="${PLATFORM_LAB_ID:-${LAB_ID:-}}"
+  local tenant_id="${ROCKIELAB_TENANT_ID:-}"
+  local target_dir="${PLATFORM_TARGET_DIR:-${TARGET_DIR:-/home/runtime}}"
+  if [ -z "$lab_id" ]; then
+    log "WARN: settings.json.j2 render: LAB_ID unset, substituting empty"
+  fi
+  if [ -z "$tenant_id" ]; then
+    log "WARN: settings.json.j2 render: TENANT_ID unset, substituting empty"
+  fi
+  if [ -z "$target_dir" ]; then
+    log "WARN: settings.json.j2 render: TARGET_DIR unset, substituting empty"
+  fi
+  mkdir -p "$(dirname "$output")"
+  sed \
+    -e "s|{{ LAB_ID }}|${lab_id}|g" \
+    -e "s|{{ TENANT_ID }}|${tenant_id}|g" \
+    -e "s|{{ TARGET_DIR }}|${target_dir}|g" \
+    "$template" > "$output"
+  if command -v python3 >/dev/null 2>&1; then
+    if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$output" 2>/dev/null; then
+      log "WARN: settings.json.j2 render: ${output} failed JSON validation; continuing"
+      return 0
+    fi
+  fi
+  log "settings.json rendered → ${output} (lab=${lab_id:-<empty>}, tenant=${tenant_id:-<empty>}, target=${target_dir:-<empty>})"
+}
+
 # If the caller passed a command (e.g. `docker run image claude --version`),
 # just run it. The mode router only kicks in when no command is given.
 if [ "$#" -gt 0 ]; then
   exec "$@"
 fi
+
+# --- settings.json render (must precede broker + any subscription CLI) -----
+render_settings_json
 
 # --- broker (always-on) -----------------------------------------------------
 if [ -x /usr/local/bin/broker ]; then
