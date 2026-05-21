@@ -48,6 +48,8 @@ describe("sandbox ssh helpers", () => {
     expect(config).toContain("UpdateHostKeys no");
 
     const configDir = session.configPath.slice(0, session.configPath.lastIndexOf("/"));
+    const identityStat = await fs.stat(`${configDir}/identity`);
+    expect(identityStat.mode & 0o777).toBe(0o600);
     expect(await fs.readFile(`${configDir}/identity`, "utf8")).toBe("PRIVATE KEY\n");
     expect(await fs.readFile(`${configDir}/certificate.pub`, "utf8")).toBe("SSH CERT\n");
     expect(await fs.readFile(`${configDir}/known_hosts`, "utf8")).toBe(

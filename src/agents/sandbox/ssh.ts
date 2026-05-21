@@ -6,6 +6,7 @@ import { resolveBoundaryPath } from "../../infra/boundary-path.js";
 import { buildOwnedChildEnv, containsSecretValueInArgv } from "../../infra/owned-child-env.js";
 import { parseSshTarget } from "../../infra/ssh-tunnel.js";
 import { resolvePreferredOpenClawTmpDir } from "../../infra/tmp-openclaw-dir.js";
+import { createRuntimeSecretRedactor } from "../../secrets/platform-runtime.js";
 import { resolveUserPath } from "../../utils.js";
 import type { SandboxBackendCommandResult } from "./backend-handle.types.js";
 import { sanitizeEnvVars } from "./sanitize-env-vars.js";
@@ -40,10 +41,42 @@ export type RunSshSandboxCommandParams = {
 };
 
 const FIXED_HEREDOC_SCRIPTS = {
-  "openclaw-sandbox-fs": "set -euo pipefail\ncat >/dev/null\n",
-  "openclaw-sandbox-upload": "set -euo pipefail\ncat >/dev/null\n",
-  "rockie-secret-runtime": "set -euo pipefail\ncat >/dev/null\n",
+  "openclaw-sandbox-upload": [
+    "set -euo pipefail",
+    'script_id="${1:?script id required}"',
+    'remote_dir="${2:?remote dir required}"',
+    'if [ "$script_id" != "openclaw-sandbox-upload" ]; then exit 64; fi',
+    'mkdir -p -- "$remote_dir"',
+    'tar -xf - -C "$remote_dir"',
+    "",
+  ].join("\n"),
+  "rockie-secret-runtime": [
+    "set -euo pipefail",
+    'script_id="${1:?script id required}"',
+    'secret_name="${2:-SECRET}"',
+    'if [ "$script_id" != "rockie-secret-runtime" ]; then exit 64; fi',
+    "umask 077",
+    'secret_file="$(mktemp)"',
+    "trap 'rm -f \"$secret_file\"' EXIT",
+    'cat > "$secret_file"',
+    'printf "<redacted:%s>\\n" "$secret_name"',
+    "",
+  ].join("\n"),
 } as const;
+
+const FIXED_HEREDOC_REMOTE_WRAPPER = [
+  "set -euo pipefail",
+  'script_id="${1:?script id required}"',
+  "shift",
+  'case "$script_id" in openclaw-sandbox-upload|rockie-secret-runtime) ;; *) exit 64 ;; esac',
+  "IFS= read -r script_size",
+  'case "$script_size" in ""|*[!0-9]*) exit 64 ;; esac',
+  "umask 077",
+  'script_file="$(mktemp)"',
+  "trap 'rm -f \"$script_file\"' EXIT",
+  'dd bs=1 count="$script_size" of="$script_file" 2>/dev/null',
+  'bash "$script_file" "$script_id" "$@"',
+].join("\n");
 
 function normalizeInlineSshMaterial(contents: string, filename: string): string {
   const withoutBom = contents.replace(/^\uFEFF/, "");
@@ -139,7 +172,20 @@ export function buildFixedSshHeredocRemoteCommand(params: {
   if (!(params.scriptId in FIXED_HEREDOC_SCRIPTS)) {
     throw new Error(`Unreviewed SSH heredoc script id: ${params.scriptId}`);
   }
-  return buildRemoteCommand(["bash", "-s", "--", params.scriptId, ...(params.args ?? [])]);
+  return buildRemoteCommand([
+    "bash",
+    "-c",
+    FIXED_HEREDOC_REMOTE_WRAPPER,
+    "openclaw-fixed-heredoc",
+    params.scriptId,
+    ...(params.args ?? []),
+  ]);
+}
+
+function buildFixedSshHeredocPayloadPrefix(scriptId: keyof typeof FIXED_HEREDOC_SCRIPTS): Buffer {
+  const script = FIXED_HEREDOC_SCRIPTS[scriptId];
+  const scriptBuffer = Buffer.from(script.endsWith("\n") ? script : `${script}\n`, "utf8");
+  return Buffer.concat([Buffer.from(`${scriptBuffer.length}\n`, "utf8"), scriptBuffer]);
 }
 
 export async function runFixedSshHeredocScript(params: {
@@ -154,20 +200,29 @@ export async function runFixedSshHeredocScript(params: {
     scriptId: params.scriptId,
     args: params.args,
   });
-  const script = FIXED_HEREDOC_SCRIPTS[params.scriptId];
   const payload = Buffer.concat([
-    Buffer.from(script.endsWith("\n") ? script : `${script}\n`, "utf8"),
+    buildFixedSshHeredocPayloadPrefix(params.scriptId),
     typeof params.stdin === "string"
       ? Buffer.from(params.stdin, "utf8")
       : (params.stdin ?? Buffer.alloc(0)),
   ]);
-  return await runSshSandboxCommand({
-    session: params.session,
-    remoteCommand,
-    stdin: payload,
-    signal: params.signal,
-    secretValues: params.secretValues,
-  });
+  const redactor = createRuntimeSecretRedactor(params.secretValues);
+  try {
+    const result = await runSshSandboxCommand({
+      session: params.session,
+      remoteCommand,
+      stdin: payload,
+      signal: params.signal,
+      secretValues: params.secretValues,
+    });
+    return {
+      ...result,
+      stdout: Buffer.from(redactor.redact(result.stdout.toString("utf8")), "utf8"),
+      stderr: Buffer.from(redactor.redact(result.stderr.toString("utf8")), "utf8"),
+    };
+  } finally {
+    redactor.close();
+  }
 }
 
 export async function createSshSandboxSessionFromConfigText(params: {
@@ -201,7 +256,11 @@ export async function createSshSandboxSessionFromSettings(
   const configDir = await fs.mkdtemp(path.join(resolveSshTmpRoot(), "openclaw-sandbox-ssh-"));
   try {
     const materializedIdentity = settings.identityData
-      ? await writeSecretMaterial(configDir, "identity", settings.identityData)
+      ? await writeResolvedSshKeyTempfile({
+          dir: configDir,
+          value: settings.identityData,
+          category: "ssh_key",
+        })
       : undefined;
     const materializedCertificate = settings.certificateData
       ? await writeSecretMaterial(configDir, "certificate.pub", settings.certificateData)
@@ -318,13 +377,10 @@ export async function uploadDirectoryToSshTarget(params: {
   signal?: AbortSignal;
 }): Promise<void> {
   await assertSafeUploadSymlinks(params.localDir);
-  const remoteCommand = buildRemoteCommand([
-    "/bin/sh",
-    "-c",
-    'mkdir -p -- "$1" && tar -xf - -C "$1"',
-    "openclaw-sandbox-upload",
-    params.remoteDir,
-  ]);
+  const remoteCommand = buildFixedSshHeredocRemoteCommand({
+    scriptId: "openclaw-sandbox-upload",
+    args: [params.remoteDir],
+  });
   const sshArgv = buildSshSandboxArgv({
     session: params.session,
     remoteCommand,
@@ -361,7 +417,14 @@ export async function uploadDirectoryToSshTarget(params: {
 
     tar.on("error", fail);
     ssh.on("error", fail);
-    tar.stdout.pipe(ssh.stdin);
+    const pipeTarArchive = () => {
+      tar.stdout.pipe(ssh.stdin);
+    };
+    if (!ssh.stdin.write(buildFixedSshHeredocPayloadPrefix("openclaw-sandbox-upload"))) {
+      ssh.stdin.once("drain", pipeTarArchive);
+    } else {
+      pipeTarArchive();
+    }
 
     tar.on("close", (code) => {
       tarClosed = true;

@@ -89,16 +89,26 @@ function configureSingleLspServer(): void {
 }
 
 describe("bundle LSP runtime", () => {
+  const originalEnv = { ...process.env };
+
   afterEach(async () => {
     const { disposeAllBundleLspRuntimes } = await import("./pi-bundle-lsp-runtime.js");
     await disposeAllBundleLspRuntimes();
     spawnMock.mockReset();
     killProcessTreeMock.mockReset();
     loadEmbeddedPiLspConfigMock.mockReset();
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) {
+        delete process.env[key];
+      }
+    }
+    Object.assign(process.env, originalEnv);
   });
 
   it("starts LSP servers in a disposable process group", async () => {
     configureSingleLspServer();
+    process.env.OPENAI_API_KEY = "sk-lsp-secret";
+    process.env.LANG = "en_US.UTF-8";
     const child = new MockChildProcess();
     spawnMock.mockReturnValue(child);
     const { createBundleLspToolRuntime } = await import("./pi-bundle-lsp-runtime.js");
@@ -110,10 +120,15 @@ describe("bundle LSP runtime", () => {
       ["--stdio"],
       expect.objectContaining({
         detached: process.platform !== "win32",
+        env: expect.objectContaining({
+          LANG: "en_US.UTF-8",
+        }),
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: process.platform === "win32",
       }),
     );
+    const env = spawnMock.mock.calls[0]?.[2]?.env as NodeJS.ProcessEnv | undefined;
+    expect(env?.OPENAI_API_KEY).toBeUndefined();
     expect(runtime.tools.map((tool) => tool.name)).toContain("lsp_hover_typescript");
 
     await runtime.dispose();

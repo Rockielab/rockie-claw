@@ -159,6 +159,7 @@ export async function runExec(
     const invocation = resolveChildProcessInvocation({ argv: [command, ...args] });
     const { stdout, stderr } = (await execFileAsync(invocation.command, invocation.args, {
       ...options,
+      env: buildOwnedChildEnv(),
       windowsHide: invocation.windowsHide,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
     })) as { stdout: Buffer; stderr: Buffer };
@@ -346,6 +347,7 @@ export async function runCommandWithTimeout(
         try {
           spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
             stdio: "ignore",
+            env: buildOwnedChildEnv(),
             windowsHide: true,
           });
           return;
