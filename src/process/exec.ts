@@ -5,6 +5,7 @@ import process from "node:process";
 import { promisify } from "node:util";
 import { danger, shouldLogVerbose } from "../globals.js";
 import { markOpenClawExecEnv } from "../infra/openclaw-exec-env.js";
+import { buildOwnedChildEnv } from "../infra/owned-child-env.js";
 import {
   decodeWindowsOutputBuffer,
   resolveWindowsConsoleEncoding,
@@ -247,7 +248,7 @@ export function resolveCommandEnv(params: {
   env?: NodeJS.ProcessEnv;
   baseEnv?: NodeJS.ProcessEnv;
 }): NodeJS.ProcessEnv {
-  const baseEnv = params.baseEnv ?? process.env;
+  const baseEnv = params.baseEnv ?? buildOwnedChildEnv();
   const argv = params.argv;
   const shouldSuppressNpmFund = (() => {
     const cmd = path.basename(argv[0] ?? "");

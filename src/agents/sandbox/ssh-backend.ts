@@ -1,4 +1,5 @@
 import path from "node:path";
+import { buildOwnedChildEnv } from "../../infra/owned-child-env.js";
 import { normalizeLowercaseStringOrEmpty } from "../../shared/string-coerce.js";
 import type {
   SandboxBackendCommandParams,
@@ -156,7 +157,7 @@ class SshSandboxBackendImpl {
             remoteCommand,
             tty: usePty,
           }),
-          env: sanitizeEnvVars(process.env).allowed,
+          env: sanitizeEnvVars(buildOwnedChildEnv()).allowed,
           stdinMode: "pipe-open",
           finalizeToken: { sshSession } satisfies PendingExec,
         };

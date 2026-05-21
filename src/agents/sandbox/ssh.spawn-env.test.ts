@@ -49,6 +49,9 @@ function mockSuccessfulSpawnCalls(times = 1) {
 
 let runSshSandboxCommand: typeof import("./ssh.js").runSshSandboxCommand;
 let uploadDirectoryToSshTarget: typeof import("./ssh.js").uploadDirectoryToSshTarget;
+let buildFixedSshHeredocRemoteCommand: typeof import("./ssh.js").buildFixedSshHeredocRemoteCommand;
+let runFixedSshHeredocScript: typeof import("./ssh.js").runFixedSshHeredocScript;
+let writeResolvedSshKeyTempfile: typeof import("./ssh.js").writeResolvedSshKeyTempfile;
 
 describe("ssh subprocess env sanitization", () => {
   const originalEnv = { ...process.env };
@@ -57,7 +60,13 @@ describe("ssh subprocess env sanitization", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    ({ runSshSandboxCommand, uploadDirectoryToSshTarget } = await import("./ssh.js"));
+    ({
+      runSshSandboxCommand,
+      uploadDirectoryToSshTarget,
+      buildFixedSshHeredocRemoteCommand,
+      runFixedSshHeredocScript,
+      writeResolvedSshKeyTempfile,
+    } = await import("./ssh.js"));
   });
 
   afterEach(async () => {
@@ -143,4 +152,56 @@ describe("ssh subprocess env sanitization", () => {
       expect(spawnMock).toHaveBeenCalledTimes(2);
     },
   );
+
+  it("rejects unreviewed fixed heredoc script ids", () => {
+    expect(() =>
+      buildFixedSshHeredocRemoteCommand({ scriptId: "user-controlled", args: [] }),
+    ).toThrow(/Unreviewed SSH heredoc script id/);
+  });
+
+  it("runs fixed heredoc scripts without placing secrets in argv", async () => {
+    mockSuccessfulSpawnCalls();
+    await runFixedSshHeredocScript({
+      session: {
+        command: "ssh",
+        configPath: "/tmp/openclaw-test-ssh-config",
+        host: "openclaw-sandbox",
+      },
+      scriptId: "rockie-secret-runtime",
+      stdin: "CANARY_SECRET_VALUE",
+      secretValues: { DEPLOY_KEY: "CANARY_SECRET_VALUE" },
+    });
+    const argv = spawnMock.mock.calls[0]?.slice(0, 2).flat() as string[];
+    expect(argv.join("\0")).not.toContain("CANARY_SECRET_VALUE");
+  });
+
+  it("rejects ssh argv containing resolved secret values", async () => {
+    await expect(
+      runSshSandboxCommand({
+        session: {
+          command: "ssh",
+          configPath: "/tmp/CANARY_SECRET_VALUE/config",
+          host: "openclaw-sandbox",
+        },
+        remoteCommand: "true",
+        secretValues: { DEPLOY_KEY: "CANARY_SECRET_VALUE" },
+      }),
+    ).rejects.toThrow(/resolved secret in argv/);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("gates resolved ssh key tempfiles on ssh_key category and writes 0600", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-ssh-key-category-"));
+    tempDirs.push(dir);
+    await expect(
+      writeResolvedSshKeyTempfile({ dir, value: "key", category: "token" }),
+    ).rejects.toThrow(/ssh_key/);
+    const keyPath = await writeResolvedSshKeyTempfile({
+      dir,
+      value: "-----BEGIN KEY-----\\nabc\\n-----END KEY-----",
+      category: "ssh_key",
+    });
+    const stat = await fs.stat(keyPath);
+    expect(stat.mode & 0o777).toBe(0o600);
+  });
 });

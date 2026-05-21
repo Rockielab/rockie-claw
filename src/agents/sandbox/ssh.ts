@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { resolveBoundaryPath } from "../../infra/boundary-path.js";
+import { buildOwnedChildEnv, containsSecretValueInArgv } from "../../infra/owned-child-env.js";
 import { parseSshTarget } from "../../infra/ssh-tunnel.js";
 import { resolvePreferredOpenClawTmpDir } from "../../infra/tmp-openclaw-dir.js";
 import { resolveUserPath } from "../../utils.js";
@@ -35,7 +36,14 @@ export type RunSshSandboxCommandParams = {
   allowFailure?: boolean;
   signal?: AbortSignal;
   tty?: boolean;
+  secretValues?: Record<string, string>;
 };
+
+const FIXED_HEREDOC_SCRIPTS = {
+  "openclaw-sandbox-fs": "set -euo pipefail\ncat >/dev/null\n",
+  "openclaw-sandbox-upload": "set -euo pipefail\ncat >/dev/null\n",
+  "rockie-secret-runtime": "set -euo pipefail\ncat >/dev/null\n",
+} as const;
 
 function normalizeInlineSshMaterial(contents: string, filename: string): string {
   const withoutBom = contents.replace(/^\uFEFF/, "");
@@ -110,6 +118,56 @@ export function buildSshSandboxArgv(params: {
     params.session.host,
     params.remoteCommand,
   ];
+}
+
+export function assertNoSecretValuesInArgv(
+  argv: readonly string[],
+  secretValues: Record<string, string> | undefined,
+): void {
+  if (!secretValues || Object.keys(secretValues).length === 0) {
+    return;
+  }
+  if (containsSecretValueInArgv(argv, Object.values(secretValues))) {
+    throw new Error("Refusing to spawn SSH child with a resolved secret in argv.");
+  }
+}
+
+export function buildFixedSshHeredocRemoteCommand(params: {
+  scriptId: string;
+  args?: readonly string[];
+}): string {
+  if (!(params.scriptId in FIXED_HEREDOC_SCRIPTS)) {
+    throw new Error(`Unreviewed SSH heredoc script id: ${params.scriptId}`);
+  }
+  return buildRemoteCommand(["bash", "-s", "--", params.scriptId, ...(params.args ?? [])]);
+}
+
+export async function runFixedSshHeredocScript(params: {
+  session: SshSandboxSession;
+  scriptId: keyof typeof FIXED_HEREDOC_SCRIPTS;
+  args?: readonly string[];
+  stdin?: Buffer | string;
+  secretValues: Record<string, string>;
+  signal?: AbortSignal;
+}): Promise<SandboxBackendCommandResult> {
+  const remoteCommand = buildFixedSshHeredocRemoteCommand({
+    scriptId: params.scriptId,
+    args: params.args,
+  });
+  const script = FIXED_HEREDOC_SCRIPTS[params.scriptId];
+  const payload = Buffer.concat([
+    Buffer.from(script.endsWith("\n") ? script : `${script}\n`, "utf8"),
+    typeof params.stdin === "string"
+      ? Buffer.from(params.stdin, "utf8")
+      : (params.stdin ?? Buffer.alloc(0)),
+  ]);
+  return await runSshSandboxCommand({
+    session: params.session,
+    remoteCommand,
+    stdin: payload,
+    signal: params.signal,
+    secretValues: params.secretValues,
+  });
 }
 
 export async function createSshSandboxSessionFromConfigText(params: {
@@ -214,7 +272,8 @@ export async function runSshSandboxCommand(
     remoteCommand: params.remoteCommand,
     tty: params.tty,
   });
-  const sshEnv = sanitizeEnvVars(process.env).allowed;
+  assertNoSecretValuesInArgv(argv, params.secretValues);
+  const sshEnv = sanitizeEnvVars(buildOwnedChildEnv()).allowed;
   return await new Promise<SandboxBackendCommandResult>((resolve, reject) => {
     const child = spawn(argv[0], argv.slice(1), {
       stdio: ["pipe", "pipe", "pipe"],
@@ -270,10 +329,11 @@ export async function uploadDirectoryToSshTarget(params: {
     session: params.session,
     remoteCommand,
   });
-  const sshEnv = sanitizeEnvVars(process.env).allowed;
+  const sshEnv = sanitizeEnvVars(buildOwnedChildEnv()).allowed;
   await new Promise<void>((resolve, reject) => {
     const tar = spawn("tar", ["-C", params.localDir, "-cf", "-", "."], {
       stdio: ["ignore", "pipe", "pipe"],
+      env: buildOwnedChildEnv(),
       signal: params.signal,
     });
     const ssh = spawn(sshArgv[0], sshArgv.slice(1), {
@@ -396,4 +456,15 @@ async function writeSecretMaterial(
   });
   await fs.chmod(pathname, 0o600);
   return pathname;
+}
+
+export async function writeResolvedSshKeyTempfile(params: {
+  dir: string;
+  value: string;
+  category: string;
+}): Promise<string> {
+  if (params.category !== "ssh_key") {
+    throw new Error("SSH key material requires secret category ssh_key.");
+  }
+  return await writeSecretMaterial(params.dir, "identity", params.value);
 }
