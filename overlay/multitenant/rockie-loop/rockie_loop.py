@@ -11,8 +11,8 @@ iteration:
   2. If there's an in-flight experiment, poll its job status. If
      done, transition the queue row to done/failed.
   3. If the queue is non-empty and no experiment is running, pop
-     the highest-priority queued row and launch it via the
-     `experiment_submit` MCP tool path.
+     the highest-priority queued row. Fixed `gpu_smoke` rows launch
+     through the GPU broker; other rows use `experiment_submit`.
   4. If the queue is shallow (depth < 3) and we're not paused,
      run an "idle planning" pass — proposes 1-3 candidate
      experiments via the broker `/chat-pty` LLM substrate, queues
@@ -93,6 +93,8 @@ IDLE_SLEEP_SECONDS = 300
 
 # Idle planning: only trigger when queue depth is below this threshold.
 IDLE_PLAN_QUEUE_DEPTH = 3
+GPU_SMOKE_TYPES = {"A40_48GB", "A100_80GB"}
+GPU_SMOKE_MAX_HOURS = 0.25
 
 # Stop sentinel — flipped by SIGTERM / SIGINT handlers.
 _STOP = False
@@ -387,6 +389,73 @@ def _submit_experiment(spec: dict) -> Optional[dict]:
         return None
 
 
+def _gpu_smoke_body(spec: dict) -> Optional[dict]:
+    if spec.get("kind") != "gpu_smoke":
+        return None
+    if any(k in spec for k in ("env", "command", "credentials", "credential")):
+        return None
+    gpu_type = str(spec.get("gpu_type") or "")
+    if gpu_type not in GPU_SMOKE_TYPES:
+        return None
+    if spec.get("route_quote_available") is not True:
+        return None
+    if not spec.get("route_quote_provider"):
+        return None
+    if spec.get("route_quote_gpu_type") != gpu_type:
+        return None
+    if spec.get("route_quote_spot") is not True:
+        return None
+    if spec.get("dry_run_preflight") is not True:
+        return None
+    if not spec.get("dry_run_preflight_pod_id"):
+        return None
+    try:
+        hours = float(spec.get("hours") or GPU_SMOKE_MAX_HOURS)
+    except (TypeError, ValueError):
+        return None
+    if hours <= 0 or hours > GPU_SMOKE_MAX_HOURS:
+        return None
+    if spec.get("gpu_count") != 1 or spec.get("spot") is not True:
+        return None
+
+    body: dict[str, Any] = {
+        "gpu_type": gpu_type,
+        "gpu_count": 1,
+        "spot": True,
+        "hours": hours,
+        "name": "rockie-dogfood-gpu-smoke",
+    }
+    region = spec.get("region") or spec.get("route_quote_region")
+    if region:
+        body["region"] = str(region)
+    return body
+
+
+def _provision_gpu_smoke(spec: dict) -> Optional[dict]:
+    body = _gpu_smoke_body(spec)
+    if body is None:
+        _log("WARN: gpu_smoke queue row rejected by bounded-spec guard")
+        return None
+    try:
+        return _http("POST", "/api/gpu/provision", body=body)
+    except CLIError as e:
+        _log(f"WARN: gpu smoke provision failed: {e}")
+        return None
+
+
+def _teardown_gpu_pod(provider: str, pod_id: str) -> bool:
+    path = (
+        f"/api/gpu/pods/{urllib.parse.quote(pod_id, safe='')}"
+        f"?{urllib.parse.urlencode({'provider': provider})}"
+    )
+    try:
+        _http("DELETE", path)
+        return True
+    except CLIError as e:
+        _log(f"WARN: gpu smoke teardown failed: {e}")
+        return False
+
+
 def _transition_queue(
     *, lab_id: str, qid: str, state: str, experiment_id: Optional[str] = None,
     error: Optional[str] = None,
@@ -502,9 +571,41 @@ def _launch_queued_row(lab_id: str, row: dict) -> tuple[Optional[str], str]:
     """Submit one queued experiment. Returns (handle, summary)."""
     qid = row.get("id") or ""
     spec = dict(row.get("spec") or {})
+    title = row.get("title")
+    if spec.get("kind") == "gpu_smoke":
+        result = _provision_gpu_smoke(spec) or {}
+        pod_id = result.get("pod_id")
+        provider = result.get("provider")
+        if pod_id and provider:
+            handle = f"gpu:{provider}:{pod_id}"
+            teardown_ok = _teardown_gpu_pod(str(provider), str(pod_id))
+            if teardown_ok:
+                _transition_queue(
+                    lab_id=lab_id, qid=qid, state="done", experiment_id=handle
+                )
+                _emit_artifact(
+                    lab_id=lab_id,
+                    title=f"GPU smoke provisioned: {title}",
+                    body=(
+                        f"Provisioned {result.get('gpu_type') or spec.get('gpu_type')} "
+                        f"via {provider}; immediate teardown succeeded."
+                    ),
+                )
+                return handle, f"gpu smoke provisioned and torn down: {title!r}"
+            _transition_queue(
+                lab_id=lab_id, qid=qid, state="failed",
+                experiment_id=handle,
+                error="gpu smoke provisioned but teardown failed",
+            )
+            return handle, f"gpu smoke teardown failed: {title!r}"
+        _transition_queue(
+            lab_id=lab_id, qid=qid, state="failed",
+            error="gpu smoke provision returned no pod",
+        )
+        return None, f"failed gpu smoke provision: {title!r}"
+
     result = _submit_experiment(spec)
     handle = (result or {}).get("handle")
-    title = row.get("title")
     if handle:
         _transition_queue(
             lab_id=lab_id, qid=qid, state="running", experiment_id=handle
