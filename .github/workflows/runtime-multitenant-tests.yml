@@ -26,6 +26,9 @@ on:
     paths:
       - "overlay/multitenant/**"
       - ".github/workflows/runtime-multitenant-tests.yml"
+  # Manual re-run path (e.g. after a transient runner failure) without
+  # pushing a no-op commit — mirrors build-runtime-image.yml.
+  workflow_dispatch: {}
 
 concurrency:
   group: runtime-multitenant-tests-${{ github.ref }}
