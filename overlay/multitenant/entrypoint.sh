@@ -98,8 +98,8 @@ render_settings_json() {
 }
 
 # NOTE — git credential + identity pre-wire moved to BUILD TIME
-# (rockie-workspace#575 rework). It previously lived here as
-# `prewire_git_credentials()`, but the ENTRYPOINT runs AFTER the
+# (rockie-workspace#575 rework). It previously lived here as an
+# entrypoint-time shell function, but the ENTRYPOINT runs AFTER the
 # `USER runtime` directive in Dockerfile.multitenant, so this script
 # executes as the unprivileged `runtime` user — which cannot
 # `git config --system` (root-owned /etc/gitconfig → "Permission denied").
