@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+
+LOOP_PATH = Path(__file__).resolve().parents[1] / "rockie-loop" / "rockie_loop.py"
+
+
+@pytest.fixture()
+def loop():
+    loader = importlib.machinery.SourceFileLoader("rockie_loop", str(LOOP_PATH))
+    spec = importlib.util.spec_from_loader("rockie_loop", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_gpu_smoke_queue_row_uses_broker_provision_and_teardown(loop, monkeypatch):
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def fake_http(method: str, path: str, body=None, **_kwargs):
+        calls.append((method, path, body))
+        if method == "POST" and path == "/api/gpu/provision":
+            return {
+                "pod_id": "pod/403",
+                "provider": "runpod",
+                "gpu_type": "A40_48GB",
+            }
+        return {}
+
+    monkeypatch.setattr(loop, "_http", fake_http)
+    monkeypatch.setattr(loop, "_submit_experiment", lambda _spec: pytest.fail())
+
+    handle, summary = loop._launch_queued_row(
+        "lab-1",
+        {
+            "id": "queue-1",
+            "title": "Dogfood small GPU smoke run",
+            "rationale": "bounded dogfood smoke staging",
+            "spec": {
+                "kind": "gpu_smoke",
+                "gpu_type": "A40_48GB",
+                "gpu_count": 1,
+                "spot": True,
+                "hours": 0.25,
+                "route_quote_available": True,
+                "route_quote_provider": "runpod",
+                "route_quote_gpu_type": "A40_48GB",
+                "route_quote_region": "ord",
+                "route_quote_spot": True,
+                "dry_run_preflight": True,
+                "dry_run_preflight_pod_id": "dryrun-403",
+            },
+        },
+    )
+
+    assert handle == "gpu:runpod:pod/403"
+    assert summary == "gpu smoke provisioned and torn down: 'Dogfood small GPU smoke run'"
+    assert calls[0] == (
+        "POST",
+        "/api/gpu/provision",
+        {
+            "gpu_type": "A40_48GB",
+            "gpu_count": 1,
+            "spot": True,
+            "hours": 0.25,
+            "name": "rockie-dogfood-gpu-smoke",
+            "region": "ord",
+        },
+    )
+    assert calls[1] == ("DELETE", "/api/gpu/pods/pod%2F403?provider=runpod", None)
+    assert calls[2] == (
+        "POST",
+        "/api/labs/lab-1/loop-queue/queue-1/state",
+        {"state": "done", "experiment_id": "gpu:runpod:pod/403"},
+    )
+    assert calls[3][0:2] == ("POST", "/api/agent-tools/emit_artifact")
+
+
+def test_gpu_smoke_queue_row_rejects_unbounded_or_credential_fields(loop, monkeypatch):
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def fake_http(method: str, path: str, body=None, **_kwargs):
+        calls.append((method, path, body))
+        return {}
+
+    monkeypatch.setattr(loop, "_http", fake_http)
+    handle, summary = loop._launch_queued_row(
+        "lab-1",
+        {
+            "id": "queue-1",
+            "title": "bad smoke",
+            "spec": {
+                "kind": "gpu_smoke",
+                "gpu_type": "A40_48GB",
+                "gpu_count": 1,
+                "spot": True,
+                "hours": 0.25,
+                "route_quote_available": True,
+                "route_quote_provider": "runpod",
+                "route_quote_gpu_type": "A40_48GB",
+                "route_quote_spot": True,
+                "dry_run_preflight": True,
+                "dry_run_preflight_pod_id": "dryrun-403",
+                "env": {"TOKEN": "nope"},
+            },
+        },
+    )
+
+    assert handle is None
+    assert summary == "failed gpu smoke provision: 'bad smoke'"
+    assert calls == [
+        (
+            "POST",
+            "/api/labs/lab-1/loop-queue/queue-1/state",
+            {"state": "failed", "error": "gpu smoke provision returned no pod"},
+        )
+    ]
+
+
+def test_gpu_smoke_queue_row_requires_route_and_dry_run_evidence(loop, monkeypatch):
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def fake_http(method: str, path: str, body=None, **_kwargs):
+        calls.append((method, path, body))
+        return {}
+
+    monkeypatch.setattr(loop, "_http", fake_http)
+    handle, summary = loop._launch_queued_row(
+        "lab-1",
+        {
+            "id": "queue-1",
+            "title": "forged smoke",
+            "spec": {
+                "kind": "gpu_smoke",
+                "gpu_type": "A40_48GB",
+                "gpu_count": 1,
+                "spot": True,
+                "hours": 0.25,
+            },
+        },
+    )
+
+    assert handle is None
+    assert summary == "failed gpu smoke provision: 'forged smoke'"
+    assert calls == [
+        (
+            "POST",
+            "/api/labs/lab-1/loop-queue/queue-1/state",
+            {"state": "failed", "error": "gpu smoke provision returned no pod"},
+        )
+    ]
