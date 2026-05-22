@@ -2,7 +2,7 @@
 
 rockie-workspace#575 / platform-runtime#24: git credential-helper and
 default-identity registration used to be an entrypoint-time shell
-function (``prewire_git_credentials()`` in ``entrypoint.sh``). That ran
+function in ``entrypoint.sh``. That ran
 AFTER the ``USER runtime`` directive, so it executed as the unprivileged
 ``runtime`` user and could not ``git config --system`` into the
 root-owned ``/etc/gitconfig``. The broker ``/spawn`` + ``/ws`` PTY spawn
