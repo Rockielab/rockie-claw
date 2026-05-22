@@ -105,14 +105,24 @@ render_settings_json() {
 # `git push` against github.com / huggingface.co does NOT, so every agent
 # re-solves the same two papercuts. This wires them once at boot:
 #
-#   - GitHub:      `gh auth setup-git` registers a credential helper for
-#                  github.com keyed off the authenticated `gh` session
-#                  (which itself reads GH_TOKEN from env).
+#   - GitHub:      a credential helper for github.com + gist.github.com
+#                  keyed off `gh auth git-credential` (`gh` itself reads
+#                  GH_TOKEN from env).
 #   - HuggingFace: `git-credential-hf-env.sh` emits HF_TOKEN for
 #                  huggingface.co (no `gh`-equivalent exists for HF).
 #   - Identity:    a default `user.name` / `user.email` so the first
 #                  commit in a fresh clone does not fail with
 #                  "Author identity unknown".
+#
+# SCOPE — must be --system, not --global (rockie-workspace#575 rework):
+# the broker `/spawn` + `/ws` PTY spawn the agent shell as **root**
+# (HOME=/root, PID-1 HOME=/), while `git config --global` run from this
+# entrypoint lands in the runtime user's ~/.gitconfig (/home/runtime/.gitconfig)
+# — a file the root-spawned agent never reads. `--system` writes
+# /etc/gitconfig, which is user-independent and IS visible to the agent's
+# git, exactly how the pre-existing `git-credential-rockie.sh` is wired
+# (Dockerfile.multitenant: `git config --system credential.helper ...`).
+# The entrypoint runs as root at boot, so it can write /etc/gitconfig.
 #
 # Every step is conditional / no-op when the tokens are absent (BYOK /
 # open-weights tenants, or pre-connection state) and never hard-fails the
@@ -124,32 +134,50 @@ prewire_git_credentials() {
   fi
 
   # Default identity — set unconditionally (it is harmless without tokens
-  # and lets ad-hoc local commits work). --global writes ~/.gitconfig for
-  # the runtime user; do not clobber an identity the tenant already set.
-  if [ -z "$(git config --global user.name 2>/dev/null || true)" ]; then
-    if git config --global user.name "Rockie Agent"; then
+  # and lets ad-hoc local commits work). --system writes /etc/gitconfig so
+  # the root-spawned agent shell sees it; do not clobber an identity the
+  # tenant already set at any scope (--get with no --system reads the
+  # merged config: system + global + local).
+  if [ -z "$(git config user.name 2>/dev/null || true)" ]; then
+    if git config --system user.name "Rockie Agent"; then
       log "git: default user.name set (Rockie Agent)"
     else
       log "WARN: git config user.name failed; continuing"
     fi
   fi
-  if [ -z "$(git config --global user.email 2>/dev/null || true)" ]; then
-    if git config --global user.email "agent@rockielab.com"; then
+  if [ -z "$(git config user.email 2>/dev/null || true)" ]; then
+    if git config --system user.email "agent@rockielab.com"; then
       log "git: default user.email set (agent@rockielab.com)"
     else
       log "WARN: git config user.email failed; continuing"
     fi
   fi
 
-  # GitHub — `gh auth setup-git` wires credential.https://github.com.helper
-  # to `gh auth git-credential`. `gh` is authenticated by GH_TOKEN in env,
-  # so this only does useful work when the tenant connected GitHub.
+  # GitHub — register a credential helper that calls `gh auth git-credential`
+  # (`gh` is authenticated by GH_TOKEN in env). We do NOT use
+  # `gh auth setup-git`: it only writes --global, which the root-spawned
+  # agent never reads. Instead we replicate exactly what it would install,
+  # into --system: for each github host, an empty `helper` value first
+  # (resets any inherited helper for that host so ordering is
+  # deterministic), then `!gh auth git-credential`. The bang prefix makes
+  # git run it as a shell command; we resolve `gh` to an absolute path so
+  # the helper does not depend on the agent shell's PATH. Both github.com
+  # and gist.github.com are wired, matching `gh auth setup-git`.
   if [ -n "${GH_TOKEN:-}" ]; then
-    if command -v gh >/dev/null 2>&1; then
-      if gh auth setup-git >/dev/null 2>&1; then
-        log "git: github.com credential helper wired via gh auth setup-git"
+    local gh_bin
+    gh_bin="$(command -v gh 2>/dev/null || true)"
+    if [ -n "$gh_bin" ]; then
+      local gh_host gh_wired=1
+      for gh_host in github.com gist.github.com; do
+        if ! { git config --system --replace-all "credential.https://${gh_host}.helper" "" \
+               && git config --system --add "credential.https://${gh_host}.helper" "!${gh_bin} auth git-credential"; }; then
+          gh_wired=0
+        fi
+      done
+      if [ "$gh_wired" -eq 1 ]; then
+        log "git: github.com + gist.github.com credential helpers wired (--system, !${gh_bin} auth git-credential)"
       else
-        log "WARN: gh auth setup-git failed; plain git push to github.com may prompt"
+        log "WARN: git config of github credential helper failed; plain git push to github.com may prompt"
       fi
     else
       log "WARN: GH_TOKEN set but gh CLI missing; skipping github.com credential wire"
@@ -161,11 +189,12 @@ prewire_git_credentials() {
   # HuggingFace — register the static env-backed helper for huggingface.co.
   # Only wire it when HF_TOKEN is present; the helper itself also fails
   # silent without the token, but skipping the `git config` write keeps
-  # `.gitconfig` clean for unconnected tenants.
+  # /etc/gitconfig clean for unconnected tenants. --system so the
+  # root-spawned agent shell sees it (see SCOPE note above).
   if [ -n "${HF_TOKEN:-}" ]; then
     local hf_helper="/usr/local/bin/git-credential-hf-env.sh"
     if [ -x "$hf_helper" ]; then
-      if git config --global "credential.https://huggingface.co.helper" "$hf_helper"; then
+      if git config --system "credential.https://huggingface.co.helper" "$hf_helper"; then
         log "git: huggingface.co credential helper wired (${hf_helper})"
       else
         log "WARN: git config of huggingface.co helper failed; plain git push to huggingface.co may prompt"
