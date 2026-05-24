@@ -6,11 +6,11 @@ at boot via `MODE`.
 
 ## Modes
 
-| `MODE` | What runs | When to use |
-|---|---|---|
+| `MODE`         | What runs                                                                                                                            | When to use                                                                               |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
 | `subscription` | Container stays alive; tenant uses the official `claude` (and `codex`) CLIs against their Pro/Max OAuth session via PTY broker / SSH | Tenants on Anthropic Pro/Max — Anthropic eats LLM cost; platform charges only for compute |
-| `byok` | OpenClaw gateway on `:3000` against the tenant's Anthropic / OpenAI API key | Tenants that bring their own API key |
-| `open-weights` | OpenClaw gateway on `:3000` pointed at a platform-hosted open-weights endpoint (cerebras / chutes / etc.) | Internal, free-tier, or open-source-only tenants |
+| `byok`         | OpenClaw gateway on `:3000` against the tenant's Anthropic / OpenAI API key                                                          | Tenants that bring their own API key                                                      |
+| `open-weights` | OpenClaw gateway on `:3000` pointed at a platform-hosted open-weights endpoint (cerebras / chutes / etc.)                            | Internal, free-tier, or open-source-only tenants                                          |
 
 The image bundles:
 
@@ -123,11 +123,11 @@ docker run --rm rockielab-runtime-multitenant:dev ls /home/runtime/.claude/skill
 
 ## Phase boundaries
 
-| Phase | What lives where |
-|---|---|
-| 1 (this) | Image build + mode router. No PTY broker, no orchestration. |
-| 2 | PTY broker so `MODE=subscription` exposes claude/codex over a network protocol. |
-| 3+ | platform-context drives Fly machine lifecycle and `MODE` selection per tenant. |
+| Phase    | What lives where                                                                |
+| -------- | ------------------------------------------------------------------------------- |
+| 1 (this) | Image build + mode router. No PTY broker, no orchestration.                     |
+| 2        | PTY broker so `MODE=subscription` exposes claude/codex over a network protocol. |
+| 3+       | platform-context drives Fly machine lifecycle and `MODE` selection per tenant.  |
 
 ## Open questions
 

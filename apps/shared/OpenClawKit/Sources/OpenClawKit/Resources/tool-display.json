@@ -516,6 +516,15 @@
         "maxChars"
       ]
     },
+    "save_secret": {
+      "emoji": "🔐",
+      "title": "Save Secret",
+      "detailKeys": [
+        "name",
+        "category",
+        "description"
+      ]
+    },
     "code_execution": {
       "emoji": "🧮",
       "title": "Code Execution",
