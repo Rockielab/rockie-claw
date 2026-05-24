@@ -3,6 +3,7 @@
 > **Reading this from the Rockie monorepo?** This repo is `platform-runtime`,
 > a fork of `openclaw/openclaw` that bakes the per-tenant Fly machine image
 > for Rockie. The Rockie-specific surface is:
+>
 > - **`Dockerfile.multitenant`** — bakes claude/codex binaries + OpenClaw
 >   gateway + Go PTY-WS broker (`apps/broker/`) + skills overlay assembled
 >   from `../platform-skills/`.
