@@ -628,6 +628,7 @@ describe("update-cli", () => {
         stdio: "inherit",
         env: expect.objectContaining({
           NODE_DISABLE_COMPILE_CACHE: "1",
+          OPENCLAW_UPDATE_IN_PROGRESS: "1",
           OPENCLAW_UPDATE_POST_CORE: "1",
           OPENCLAW_UPDATE_POST_CORE_CHANNEL: "dev",
         }),
@@ -704,6 +705,7 @@ describe("update-cli", () => {
       expect.objectContaining({
         stdio: "inherit",
         env: expect.objectContaining({
+          OPENCLAW_UPDATE_IN_PROGRESS: "1",
           OPENCLAW_UPDATE_POST_CORE: "1",
           OPENCLAW_UPDATE_POST_CORE_CHANNEL: "dev",
           OPENCLAW_UPDATE_POST_CORE_REQUESTED_CHANNEL: "dev",
@@ -1972,6 +1974,7 @@ describe("update-cli", () => {
       expect.objectContaining({
         stdio: "inherit",
         env: expect.objectContaining({
+          OPENCLAW_UPDATE_IN_PROGRESS: "1",
           OPENCLAW_UPDATE_POST_CORE: "1",
           OPENCLAW_UPDATE_POST_CORE_CHANNEL: "stable",
         }),
@@ -2789,30 +2792,54 @@ describe("update-cli", () => {
   it("updateCommand continues after doctor sub-step and clears update flag", async () => {
     const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
     try {
-      await withEnvAsync({ OPENCLAW_UPDATE_IN_PROGRESS: undefined }, async () => {
-        vi.mocked(runGatewayUpdate).mockResolvedValue(makeOkUpdateResult());
-        vi.mocked(runDaemonRestart).mockResolvedValue(true);
-        vi.mocked(doctorCommand).mockResolvedValue(undefined);
-        vi.mocked(defaultRuntime.log).mockClear();
+      await withEnvAsync(
+        {
+          OPENCLAW_UPDATE_IN_PROGRESS: undefined,
+          OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE: "caller-value",
+        },
+        async () => {
+          vi.mocked(runGatewayUpdate).mockResolvedValue(makeOkUpdateResult());
+          vi.mocked(runDaemonRestart).mockResolvedValue(true);
+          vi.mocked(doctorCommand).mockResolvedValue(undefined);
+          vi.mocked(defaultRuntime.log).mockClear();
 
-        await updateCommand({});
+          await updateCommand({});
 
-        expect(doctorCommand).toHaveBeenCalledWith(
-          defaultRuntime,
-          expect.objectContaining({ nonInteractive: true }),
-        );
-        expect(process.env.OPENCLAW_UPDATE_IN_PROGRESS).toBeUndefined();
+          expect(doctorCommand).toHaveBeenCalledWith(
+            defaultRuntime,
+            expect.objectContaining({ nonInteractive: true }),
+          );
+          expect(process.env.OPENCLAW_UPDATE_IN_PROGRESS).toBeUndefined();
+          expect(process.env.OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE).toBe(
+            "caller-value",
+          );
 
-        const logLines = vi.mocked(defaultRuntime.log).mock.calls.map((call) => String(call[0]));
-        expect(
-          logLines.some((line) =>
-            line.includes("Leveled up! New skills unlocked. You're welcome."),
-          ),
-        ).toBe(true);
-      });
+          const logLines = vi.mocked(defaultRuntime.log).mock.calls.map((call) => String(call[0]));
+          expect(
+            logLines.some((line) =>
+              line.includes("Leveled up! New skills unlocked. You're welcome."),
+            ),
+          ).toBe(true);
+        },
+      );
     } finally {
       randomSpy.mockRestore();
     }
+  });
+
+  it("marks the whole update command as update-in-progress and restores the caller env", async () => {
+    await withEnvAsync({ OPENCLAW_UPDATE_IN_PROGRESS: "caller-value" }, async () => {
+      let observedUpdateEnv: string | undefined;
+      vi.mocked(runGatewayUpdate).mockImplementationOnce(async () => {
+        observedUpdateEnv = process.env.OPENCLAW_UPDATE_IN_PROGRESS;
+        return makeOkUpdateResult();
+      });
+
+      await updateCommand({ restart: false });
+
+      expect(observedUpdateEnv).toBe("1");
+      expect(process.env.OPENCLAW_UPDATE_IN_PROGRESS).toBe("caller-value");
+    });
   });
 
   it.each([
