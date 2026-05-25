@@ -51,14 +51,25 @@ describe("gateway startup import boundaries", () => {
     expect(validation).not.toContain("commands/doctor");
   });
 
-  it("marks gateway close before awaiting gateway_stop hooks", () => {
+  it("clears plugin metadata lifecycle caches after close prelude starts", () => {
     const serverImpl = readSource("src/gateway/server.impl.ts");
     const closeStart = serverImpl.indexOf("close: async (opts)");
+    const preludeStart = serverImpl.indexOf("const runClosePrelude = async () => {");
     const hookStart = serverImpl.indexOf("runGlobalGatewayStopSafely", closeStart);
-    const markStart = serverImpl.indexOf("markClosePreludeStarted();", closeStart);
+    const preludeMarkStart = serverImpl.indexOf("markClosePreludeStarted();", preludeStart);
+    const lifecycleClear = serverImpl.indexOf(
+      "clearPluginMetadataLifecycleCaches();",
+      preludeStart,
+    );
+    const closeModuleLoad = serverImpl.indexOf("loadGatewayCloseModule", preludeStart);
+    const closeMarkStart = serverImpl.indexOf("markClosePreludeStarted();", closeStart);
 
     expect(closeStart).toBeGreaterThan(-1);
-    expect(markStart).toBeGreaterThan(closeStart);
-    expect(markStart).toBeLessThan(hookStart);
+    expect(preludeStart).toBeGreaterThan(-1);
+    expect(preludeMarkStart).toBeGreaterThan(preludeStart);
+    expect(lifecycleClear).toBeGreaterThan(preludeMarkStart);
+    expect(lifecycleClear).toBeLessThan(closeModuleLoad);
+    expect(closeMarkStart).toBeGreaterThan(closeStart);
+    expect(closeMarkStart).toBeLessThan(hookStart);
   });
 });
