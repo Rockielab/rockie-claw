@@ -628,6 +628,7 @@ describe("update-cli", () => {
         stdio: "inherit",
         env: expect.objectContaining({
           NODE_DISABLE_COMPILE_CACHE: "1",
+          OPENCLAW_UPDATE_IN_PROGRESS: "1",
           OPENCLAW_UPDATE_POST_CORE: "1",
           OPENCLAW_UPDATE_POST_CORE_CHANNEL: "dev",
         }),
@@ -704,6 +705,7 @@ describe("update-cli", () => {
       expect.objectContaining({
         stdio: "inherit",
         env: expect.objectContaining({
+          OPENCLAW_UPDATE_IN_PROGRESS: "1",
           OPENCLAW_UPDATE_POST_CORE: "1",
           OPENCLAW_UPDATE_POST_CORE_CHANNEL: "dev",
           OPENCLAW_UPDATE_POST_CORE_REQUESTED_CHANNEL: "dev",
@@ -1972,6 +1974,7 @@ describe("update-cli", () => {
       expect.objectContaining({
         stdio: "inherit",
         env: expect.objectContaining({
+          OPENCLAW_UPDATE_IN_PROGRESS: "1",
           OPENCLAW_UPDATE_POST_CORE: "1",
           OPENCLAW_UPDATE_POST_CORE_CHANNEL: "stable",
         }),
@@ -2813,6 +2816,21 @@ describe("update-cli", () => {
     } finally {
       randomSpy.mockRestore();
     }
+  });
+
+  it("marks the whole update command as update-in-progress and restores the caller env", async () => {
+    await withEnvAsync({ OPENCLAW_UPDATE_IN_PROGRESS: "caller-value" }, async () => {
+      let observedUpdateEnv: string | undefined;
+      vi.mocked(runGatewayUpdate).mockImplementationOnce(async () => {
+        observedUpdateEnv = process.env.OPENCLAW_UPDATE_IN_PROGRESS;
+        return makeOkUpdateResult();
+      });
+
+      await updateCommand({ restart: false });
+
+      expect(observedUpdateEnv).toBe("1");
+      expect(process.env.OPENCLAW_UPDATE_IN_PROGRESS).toBe("caller-value");
+    });
   });
 
   it.each([

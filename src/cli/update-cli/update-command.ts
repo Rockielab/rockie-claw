@@ -115,6 +115,7 @@ const POST_CORE_UPDATE_CHANNEL_ENV = "OPENCLAW_UPDATE_POST_CORE_CHANNEL";
 const POST_CORE_UPDATE_REQUESTED_CHANNEL_ENV = "OPENCLAW_UPDATE_POST_CORE_REQUESTED_CHANNEL";
 const POST_CORE_UPDATE_RESULT_PATH_ENV = "OPENCLAW_UPDATE_POST_CORE_RESULT_PATH";
 const POST_CORE_UPDATE_RESULT_POLL_MS = 100;
+const UPDATE_IN_PROGRESS_ENV = "OPENCLAW_UPDATE_IN_PROGRESS";
 const UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE_ENV =
   "OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE";
 const SERVICE_REFRESH_PATH_ENV_KEYS = [
@@ -1480,7 +1481,8 @@ async function maybeRestartService(params: {
       if (!params.opts.json && restarted) {
         defaultRuntime.log(theme.success("Daemon restarted successfully."));
         defaultRuntime.log("");
-        process.env.OPENCLAW_UPDATE_IN_PROGRESS = "1";
+        const previousUpdateInProgress = process.env[UPDATE_IN_PROGRESS_ENV];
+        process.env[UPDATE_IN_PROGRESS_ENV] = "1";
         process.env[UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE_ENV] = "1";
         try {
           const interactiveDoctor =
@@ -1491,7 +1493,11 @@ async function maybeRestartService(params: {
         } catch (err) {
           defaultRuntime.log(theme.warn(`Doctor failed: ${String(err)}`));
         } finally {
-          delete process.env.OPENCLAW_UPDATE_IN_PROGRESS;
+          if (previousUpdateInProgress === undefined) {
+            delete process.env[UPDATE_IN_PROGRESS_ENV];
+          } else {
+            process.env[UPDATE_IN_PROGRESS_ENV] = previousUpdateInProgress;
+          }
           delete process.env[UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE_ENV];
         }
       }
@@ -1697,6 +1703,7 @@ async function continuePostCoreUpdateInFreshProcess(params: {
       stdio: "inherit",
       env: {
         ...stripGatewayServiceMarkerEnv(disableUpdatedPackageCompileCacheEnv(process.env)),
+        [UPDATE_IN_PROGRESS_ENV]: "1",
         [POST_CORE_UPDATE_ENV]: "1",
         [POST_CORE_UPDATE_CHANNEL_ENV]: params.channel,
         ...(params.requestedChannel
@@ -1798,6 +1805,26 @@ function shouldResumePostCoreUpdateInFreshProcess(params: {
 }
 
 export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
+  return await withUpdateInProgressEnv(async () => {
+    await updateCommandInternal(opts);
+  });
+}
+
+async function withUpdateInProgressEnv<T>(run: () => Promise<T>): Promise<T> {
+  const previousUpdateInProgress = process.env[UPDATE_IN_PROGRESS_ENV];
+  process.env[UPDATE_IN_PROGRESS_ENV] = "1";
+  try {
+    return await run();
+  } finally {
+    if (previousUpdateInProgress === undefined) {
+      delete process.env[UPDATE_IN_PROGRESS_ENV];
+    } else {
+      process.env[UPDATE_IN_PROGRESS_ENV] = previousUpdateInProgress;
+    }
+  }
+}
+
+async function updateCommandInternal(opts: UpdateCommandOptions): Promise<void> {
   suppressDeprecations();
   const invocationCwd = tryResolveInvocationCwd();
   const postCoreUpdateResume = process.env[POST_CORE_UPDATE_ENV] === "1";
