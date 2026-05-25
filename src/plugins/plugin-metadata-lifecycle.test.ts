@@ -4,7 +4,6 @@ import {
   setCurrentPluginMetadataSnapshot,
 } from "./current-plugin-metadata-snapshot.js";
 import { clearCurrentPluginMetadataSnapshotState } from "./current-plugin-metadata-state.js";
-import { resolveInstalledPluginIndexPolicyHash } from "./installed-plugin-index-policy.js";
 import {
   clearPluginMetadataLifecycleCaches,
   registerPluginMetadataProcessMemoLifecycleClear,
@@ -20,45 +19,20 @@ afterEach(() => {
 });
 
 function createSnapshot(): PluginMetadataSnapshot {
-  const policyHash = resolveInstalledPluginIndexPolicyHash();
   return {
-    policyHash,
+    policyHash: "test",
     index: {
       version: 1,
       hostContractVersion: "test",
       compatRegistryVersion: "test",
       migrationVersion: 1,
-      policyHash,
+      policyHash: "test",
       generatedAtMs: 1,
       installRecords: {},
       plugins: [],
       diagnostics: [],
     },
-    registryDiagnostics: [],
-    manifestRegistry: { plugins: [], diagnostics: [] },
-    plugins: [],
-    diagnostics: [],
-    byPluginId: new Map(),
-    normalizePluginId: (pluginId) => pluginId,
-    owners: {
-      channels: new Map(),
-      channelConfigs: new Map(),
-      providers: new Map(),
-      modelCatalogProviders: new Map(),
-      cliBackends: new Map(),
-      setupProviders: new Map(),
-      commandAliases: new Map(),
-      contracts: new Map(),
-    },
-    metrics: {
-      registrySnapshotMs: 0,
-      manifestRegistryMs: 0,
-      ownerMapsMs: 0,
-      totalMs: 0,
-      indexPluginCount: 0,
-      manifestPluginCount: 0,
-    },
-  };
+  } as PluginMetadataSnapshot;
 }
 
 describe("plugin metadata lifecycle caches", () => {
