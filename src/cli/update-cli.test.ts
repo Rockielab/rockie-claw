@@ -2792,27 +2792,36 @@ describe("update-cli", () => {
   it("updateCommand continues after doctor sub-step and clears update flag", async () => {
     const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
     try {
-      await withEnvAsync({ OPENCLAW_UPDATE_IN_PROGRESS: undefined }, async () => {
-        vi.mocked(runGatewayUpdate).mockResolvedValue(makeOkUpdateResult());
-        vi.mocked(runDaemonRestart).mockResolvedValue(true);
-        vi.mocked(doctorCommand).mockResolvedValue(undefined);
-        vi.mocked(defaultRuntime.log).mockClear();
+      await withEnvAsync(
+        {
+          OPENCLAW_UPDATE_IN_PROGRESS: undefined,
+          OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE: "caller-value",
+        },
+        async () => {
+          vi.mocked(runGatewayUpdate).mockResolvedValue(makeOkUpdateResult());
+          vi.mocked(runDaemonRestart).mockResolvedValue(true);
+          vi.mocked(doctorCommand).mockResolvedValue(undefined);
+          vi.mocked(defaultRuntime.log).mockClear();
 
-        await updateCommand({});
+          await updateCommand({});
 
-        expect(doctorCommand).toHaveBeenCalledWith(
-          defaultRuntime,
-          expect.objectContaining({ nonInteractive: true }),
-        );
-        expect(process.env.OPENCLAW_UPDATE_IN_PROGRESS).toBeUndefined();
+          expect(doctorCommand).toHaveBeenCalledWith(
+            defaultRuntime,
+            expect.objectContaining({ nonInteractive: true }),
+          );
+          expect(process.env.OPENCLAW_UPDATE_IN_PROGRESS).toBeUndefined();
+          expect(process.env.OPENCLAW_UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE).toBe(
+            "caller-value",
+          );
 
-        const logLines = vi.mocked(defaultRuntime.log).mock.calls.map((call) => String(call[0]));
-        expect(
-          logLines.some((line) =>
-            line.includes("Leveled up! New skills unlocked. You're welcome."),
-          ),
-        ).toBe(true);
-      });
+          const logLines = vi.mocked(defaultRuntime.log).mock.calls.map((call) => String(call[0]));
+          expect(
+            logLines.some((line) =>
+              line.includes("Leveled up! New skills unlocked. You're welcome."),
+            ),
+          ).toBe(true);
+        },
+      );
     } finally {
       randomSpy.mockRestore();
     }

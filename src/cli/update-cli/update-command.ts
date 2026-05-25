@@ -1481,24 +1481,18 @@ async function maybeRestartService(params: {
       if (!params.opts.json && restarted) {
         defaultRuntime.log(theme.success("Daemon restarted successfully."));
         defaultRuntime.log("");
-        const previousUpdateInProgress = process.env[UPDATE_IN_PROGRESS_ENV];
-        process.env[UPDATE_IN_PROGRESS_ENV] = "1";
-        process.env[UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE_ENV] = "1";
         try {
-          const interactiveDoctor =
-            process.stdin.isTTY && !params.opts.json && params.opts.yes !== true;
-          await doctorCommand(defaultRuntime, {
-            nonInteractive: !interactiveDoctor,
+          await withProcessEnv(UPDATE_IN_PROGRESS_ENV, "1", async () => {
+            await withProcessEnv(UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE_ENV, "1", async () => {
+              const interactiveDoctor =
+                process.stdin.isTTY && !params.opts.json && params.opts.yes !== true;
+              await doctorCommand(defaultRuntime, {
+                nonInteractive: !interactiveDoctor,
+              });
+            });
           });
         } catch (err) {
           defaultRuntime.log(theme.warn(`Doctor failed: ${String(err)}`));
-        } finally {
-          if (previousUpdateInProgress === undefined) {
-            delete process.env[UPDATE_IN_PROGRESS_ENV];
-          } else {
-            process.env[UPDATE_IN_PROGRESS_ENV] = previousUpdateInProgress;
-          }
-          delete process.env[UPDATE_PARENT_SUPPORTS_DOCTOR_CONFIG_WRITE_ENV];
         }
       }
     } catch (err) {
@@ -1805,21 +1799,21 @@ function shouldResumePostCoreUpdateInFreshProcess(params: {
 }
 
 export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
-  return await withUpdateInProgressEnv(async () => {
+  return await withProcessEnv(UPDATE_IN_PROGRESS_ENV, "1", async () => {
     await updateCommandInternal(opts);
   });
 }
 
-async function withUpdateInProgressEnv<T>(run: () => Promise<T>): Promise<T> {
-  const previousUpdateInProgress = process.env[UPDATE_IN_PROGRESS_ENV];
-  process.env[UPDATE_IN_PROGRESS_ENV] = "1";
+async function withProcessEnv<T>(key: string, value: string, run: () => Promise<T>): Promise<T> {
+  const previousValue = process.env[key];
+  process.env[key] = value;
   try {
     return await run();
   } finally {
-    if (previousUpdateInProgress === undefined) {
-      delete process.env[UPDATE_IN_PROGRESS_ENV];
+    if (previousValue === undefined) {
+      delete process.env[key];
     } else {
-      process.env[UPDATE_IN_PROGRESS_ENV] = previousUpdateInProgress;
+      process.env[key] = previousValue;
     }
   }
 }
