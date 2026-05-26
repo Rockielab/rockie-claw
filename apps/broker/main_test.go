@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -234,6 +236,22 @@ func TestChatRejectsInvalidBinary(t *testing.T) {
 	}
 }
 
+func TestChatDefaultsOmittedBinaryToClaude(t *testing.T) {
+	setBrokerTestEnv(t, "tt")
+	req := httptest.NewRequest(http.MethodPost, "/chat?token=tt", strings.NewReader(`{"prompt":"hi"}`))
+	rec := httptest.NewRecorder()
+	chatHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 fallback, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"auth_required"`) {
+		t.Fatalf("expected claude auth_required fallback, got %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "claude is not signed in") {
+		t.Fatalf("expected fallback message for claude, got %s", rec.Body.String())
+	}
+}
+
 func TestChatRejectsEmptyPrompt(t *testing.T) {
 	setBrokerTestEnv(t, "tt")
 	req := httptest.NewRequest(http.MethodPost, "/chat?binary=claude&token=tt", strings.NewReader(`{"prompt":""}`))
@@ -453,4 +471,118 @@ func TestPTYFramingRoundtrip(t *testing.T) {
 	if !gotExit {
 		t.Fatalf("never received exit frame")
 	}
+}
+
+func TestWSBinaryQueryDispatchIgnoresEnvAndDefaultsToClaude(t *testing.T) {
+	setBrokerTestEnv(t, "tt")
+	t.Setenv("MODE", "subscription")
+	t.Setenv("BINARY", "codex")
+
+	binDir := t.TempDir()
+	writeFakeBrokerBinary(t, binDir, "claude")
+	writeFakeBrokerBinary(t, binDir, "codex")
+	t.Setenv("PATH", binDir)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", wsHandler)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cases := []struct {
+		name        string
+		binaryQuery string
+		wantBinary  string
+	}{
+		{name: "explicit-codex-query-wins", binaryQuery: "codex", wantBinary: "codex"},
+		{name: "explicit-claude-query-wins", binaryQuery: "claude", wantBinary: "claude"},
+		{name: "omitted-binary-defaults-to-claude", binaryQuery: "", wantBinary: "claude"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotStdout, gotExit := dialBrokerWSAndReadAllFrames(t, srv.URL, tc.binaryQuery)
+			if !strings.Contains(gotStdout, "BROKER_BINARY="+tc.wantBinary) {
+				t.Fatalf("expected broker to spawn %q, got stdout %q", tc.wantBinary, gotStdout)
+			}
+			if !strings.Contains(gotStdout, "MODE=") {
+				t.Fatalf("expected MODE probe output, got %q", gotStdout)
+			}
+			if strings.Contains(gotStdout, "MODE=subscription") {
+				t.Fatalf("expected broker child env to ignore MODE, got %q", gotStdout)
+			}
+			if !strings.Contains(gotStdout, "BINARY=") {
+				t.Fatalf("expected BINARY probe output, got %q", gotStdout)
+			}
+			if strings.Contains(gotStdout, "\nBINARY=codex") || strings.HasPrefix(gotStdout, "BINARY=codex") {
+				t.Fatalf("expected broker child env to ignore BINARY, got %q", gotStdout)
+			}
+			if gotExit != 0 {
+				t.Fatalf("expected exit 0, got %d stdout=%q", gotExit, gotStdout)
+			}
+		})
+	}
+}
+
+func writeFakeBrokerBinary(t *testing.T, dir, name string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	script := "#!/bin/sh\n" +
+		"printf 'BROKER_BINARY=%s\\n' '" + name + "'\n" +
+		"printf 'MODE=%s\\n' \"${MODE:-}\"\n" +
+		"printf 'BINARY=%s\\n' \"${BINARY:-}\"\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake %s binary: %v", name, err)
+	}
+}
+
+func dialBrokerWSAndReadAllFrames(t *testing.T, serverURL, binaryQuery string) (string, int32) {
+	t.Helper()
+
+	wsURL := "ws" + strings.TrimPrefix(serverURL, "http") + "/ws"
+	u, err := url.Parse(wsURL)
+	if err != nil {
+		t.Fatalf("parse ws url: %v", err)
+	}
+	q := u.Query()
+	q.Set("token", "tt")
+	if binaryQuery != "" {
+		q.Set("binary", binaryQuery)
+	}
+	u.RawQuery = q.Encode()
+
+	conn, resp, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	if err != nil {
+		respBody := ""
+		if resp != nil {
+			b, _ := io.ReadAll(resp.Body)
+			respBody = string(b)
+		}
+		t.Fatalf("dial failed: %v body=%s", err, respBody)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	_ = conn.SetReadDeadline(deadline)
+
+	var stdout strings.Builder
+	var exitCode int32 = -999
+	for time.Now().Before(deadline) {
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read frame: %v stdout=%q", err, stdout.String())
+		}
+		if mt != websocket.BinaryMessage || len(data) < 1 {
+			continue
+		}
+		switch data[0] {
+		case frameStdout:
+			stdout.Write(data[1:])
+		case frameExit:
+			exitCode = int32(binary.BigEndian.Uint32(data[1:5]))
+			return stdout.String(), exitCode
+		}
+	}
+
+	t.Fatalf("timed out waiting for exit frame stdout=%q", stdout.String())
+	return "", 0
 }
