@@ -1,11 +1,3 @@
-"""Tests for the Rockie runtime CLI surface smoke.
-
-The production workflow runs ``scripts/check-cli-surface.sh`` against the
-multitenant Docker image. These tests keep the checker and workflow wiring
-locked without requiring Docker: fake ``claude`` and ``codex`` binaries are
-placed on PATH and the checker runs in host mode.
-"""
-
 from __future__ import annotations
 
 import json

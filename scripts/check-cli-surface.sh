@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Check the Claude/Codex CLI command surface used by the Rockie multitenant
-# runtime image. Runs locally by default, or inside a Docker image with --image.
-
 set -euo pipefail
 
 usage() {

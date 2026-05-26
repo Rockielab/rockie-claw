@@ -1,9 +1,5 @@
 name: runtime-cli-surface
 
-# Smoke the official Claude/Codex CLI command surface baked into the Rockie
-# multitenant runtime image. This catches upstream CLI command/flag rotations
-# before the broker OAuth bridge silently regresses.
-
 on:
   pull_request:
     paths:
