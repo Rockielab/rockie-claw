@@ -135,10 +135,6 @@ function normalize(value) {
     .trim();
 }
 
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, "'\\''")}'`;
-}
-
 function unifiedDiff(label, previous, current) {
   const tmp = fs.mkdtempSync(path.join(outputDir, ".diff-"));
   const previousPath = path.join(tmp, "previous.txt");
