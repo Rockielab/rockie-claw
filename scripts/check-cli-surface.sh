@@ -210,11 +210,12 @@ for (const row of rows) {
 }
 
 const failures = rows.filter((row) => !row.ok);
+const failedRun = failures.length > 0 || drift.length > 0;
 const result = {
   schemaVersion: 1,
   checkedAt: new Date().toISOString(),
   runner: mode === "docker" ? { mode, image } : { mode },
-  ok: failures.length === 0,
+  ok: !failedRun,
   failureCount: failures.length,
   driftCount: drift.length,
   commands: rows,
@@ -231,12 +232,18 @@ fs.writeFileSync(
   "utf8",
 );
 
-const statusIcon = failures.length === 0 ? "✅" : "❌";
+const statusIcon = failedRun ? "❌" : "✅";
 const subject = mode === "docker" ? `multitenant image \`${image}\`` : "host CLI tools";
+const headline =
+  failures.length > 0
+    ? `${failures.length} CLI surface assertion(s) failed`
+    : drift.length > 0
+      ? `${drift.length} CLI surface command(s) drifted`
+      : "All 5 CLI surface assertions hold";
 const lines = [
   `## CLI Surface Smoke`,
   "",
-  `${statusIcon} ${failures.length === 0 ? "All 5 CLI surface assertions hold" : `${failures.length} CLI surface assertion(s) failed`} against ${subject}.`,
+  `${statusIcon} ${headline} against ${subject}.`,
   "",
   `| Command | Exit | Assertion | Drift |`,
   `| --- | ---: | --- | --- |`,

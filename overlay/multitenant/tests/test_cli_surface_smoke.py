@@ -226,8 +226,11 @@ esac
     result = _run_checker(tmp_path, bindir, "--baseline", str(baseline))
     assert result.returncode == 1
     current = json.loads((tmp_path / "out" / "current.json").read_text(encoding="utf-8"))
+    assert current["ok"] is False
     assert current["driftCount"] == 1
     assert "new-flag" in (tmp_path / "out" / "diff.txt").read_text(encoding="utf-8")
+    summary = (tmp_path / "out" / "summary.md").read_text(encoding="utf-8")
+    assert "CLI surface command(s) drifted" in summary
 
 
 def test_runtime_cli_surface_workflow_has_required_triggers_and_side_effects() -> None:
