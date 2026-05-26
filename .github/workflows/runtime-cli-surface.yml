@@ -32,7 +32,7 @@ concurrency:
 jobs:
   smoke:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 60
     permissions:
       contents: write
       issues: write
@@ -122,6 +122,22 @@ jobs:
           elif docker pull "${IMAGE_REPOSITORY}:${GITHUB_SHA}"; then
             image_ref="${IMAGE_REPOSITORY}:${GITHUB_SHA}"
           else
+            dockerfile_changed="$(
+              node -e '
+                const fs = require("fs");
+                const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
+                const files = [
+                  ...(event.head_commit?.added || []),
+                  ...(event.head_commit?.modified || []),
+                  ...(event.head_commit?.removed || []),
+                ];
+                process.stdout.write(files.includes("Dockerfile.multitenant") ? "true" : "false");
+              '
+            )"
+            if [ "${GITHUB_EVENT_NAME:-}" = "push" ] && [ "$dockerfile_changed" = "true" ]; then
+              echo "::error::${IMAGE_REPOSITORY}:${GITHUB_SHA} is unavailable after a Dockerfile.multitenant push; refusing to smoke stale latest."
+              exit 1
+            fi
             image_ref="${IMAGE_REPOSITORY}:latest"
             docker pull "$image_ref"
           fi

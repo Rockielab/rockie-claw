@@ -17,6 +17,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CHECKER = REPO_ROOT / "scripts" / "check-cli-surface.sh"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "runtime-cli-surface.yml"
+MULTITENANT_TESTS_WORKFLOW = (
+    REPO_ROOT / ".github" / "workflows" / "runtime-multitenant-tests.yml"
+)
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -197,3 +200,10 @@ def test_runtime_cli_surface_workflow_has_required_triggers_and_side_effects() -
     assert "createCommitComment" in workflow
     assert "issues.create({" in workflow
     assert "cli-drift" in workflow
+    assert "refusing to smoke stale latest" in workflow
+
+
+def test_multitenant_tests_workflow_runs_for_cli_surface_changes() -> None:
+    workflow = MULTITENANT_TESTS_WORKFLOW.read_text(encoding="utf-8")
+    assert "scripts/check-cli-surface.sh" in workflow
+    assert ".github/workflows/runtime-cli-surface.yml" in workflow
