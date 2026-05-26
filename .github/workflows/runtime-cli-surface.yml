@@ -44,6 +44,7 @@ jobs:
       BASELINE_DIR: .artifacts/cli-surface-baseline
       OUTPUT_DIR: .artifacts/cli-surface
       SKILLS_READ_TOKEN: ${{ secrets.PLATFORM_SKILLS_READ_TOKEN }}
+      SHOULD_BUILD_PR_IMAGE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,26 +62,31 @@ jobs:
             cli-surface-baseline-main-
 
       - name: Preflight platform-skills token for PR image build
-        if: github.event_name == 'pull_request' && env.SKILLS_READ_TOKEN == ''
+        if: env.SHOULD_BUILD_PR_IMAGE == 'true' && env.SKILLS_READ_TOKEN == ''
         run: |
           echo "::error::PLATFORM_SKILLS_READ_TOKEN secret is required to build Dockerfile.multitenant for PR smoke."
           exit 1
 
       - name: Checkout platform-skills for PR image build
-        if: github.event_name == 'pull_request'
+        if: env.SHOULD_BUILD_PR_IMAGE == 'true'
         uses: actions/checkout@v4
         with:
           repository: saml212/platform-skills
           path: vendor/platform-skills
           token: ${{ secrets.PLATFORM_SKILLS_READ_TOKEN }}
           fetch-depth: 1
+          persist-credentials: false
+
+      - name: Strip platform-skills checkout metadata
+        if: env.SHOULD_BUILD_PR_IMAGE == 'true'
+        run: rm -rf vendor/platform-skills/.git
 
       - name: Set up Buildx for PR image build
-        if: github.event_name == 'pull_request'
+        if: env.SHOULD_BUILD_PR_IMAGE == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Build PR multitenant image
-        if: github.event_name == 'pull_request'
+        if: env.SHOULD_BUILD_PR_IMAGE == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -94,7 +100,7 @@ jobs:
           cache-from: type=registry,ref=${{ env.IMAGE_REPOSITORY }}:buildcache
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
+        if: env.SHOULD_BUILD_PR_IMAGE != 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -103,7 +109,7 @@ jobs:
 
       - name: Resolve image
         id: image
-        if: github.event_name != 'pull_request'
+        if: env.SHOULD_BUILD_PR_IMAGE != 'true'
         env:
           INPUT_IMAGE: ${{ inputs.image }}
         run: |
@@ -123,7 +129,7 @@ jobs:
 
       - name: Resolve PR image
         id: pr-image
-        if: github.event_name == 'pull_request'
+        if: env.SHOULD_BUILD_PR_IMAGE == 'true'
         run: |
           echo "image_ref=${PR_IMAGE}" >> "$GITHUB_OUTPUT"
           echo "image_digest=" >> "$GITHUB_OUTPUT"

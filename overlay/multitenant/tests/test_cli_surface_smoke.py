@@ -121,6 +121,37 @@ def test_checker_fails_when_claudeai_flag_disappears(tmp_path: Path) -> None:
     assert "--claudeai" in failures
 
 
+def test_checker_fails_when_claude_version_has_no_version_token(tmp_path: Path) -> None:
+    bindir = _fake_cli_bin(tmp_path)
+    (bindir / "claude").write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "--version")
+    printf 'Claude Code\\n'
+    ;;
+  "auth login --help")
+    printf 'Usage: claude auth login [--claudeai]\\n'
+    ;;
+  "setup-token --help")
+    printf 'Usage: claude setup-token\\n'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    (bindir / "claude").chmod(0o755)
+
+    result = _run_checker(tmp_path, bindir)
+    assert result.returncode == 1
+    failures = (tmp_path / "out" / "failures.txt").read_text(encoding="utf-8")
+    assert "claude --version" in failures
+    assert "version token" in failures
+
+
 def test_checker_ignores_whitespace_only_drift(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.json"
     baseline.write_text(
@@ -156,6 +187,9 @@ def test_runtime_cli_surface_workflow_has_required_triggers_and_side_effects() -
     assert "- \"Dockerfile.multitenant\"" in workflow
     assert "schedule:" in workflow
     assert "scripts/check-cli-surface.sh" in workflow
+    assert "SHOULD_BUILD_PR_IMAGE" in workflow
+    assert "persist-credentials: false" in workflow
+    assert "rm -rf vendor/platform-skills/.git" in workflow
     assert "actions/cache/restore" in workflow
     assert "actions/cache/save" in workflow
     assert "createCommitComment" in workflow

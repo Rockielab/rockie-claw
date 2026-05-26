@@ -101,7 +101,7 @@ write_command_result() {
 }
 
 : >"$OUTPUT_DIR/raw/commands.tsv"
-write_command_result "claude-version" "claude --version" "nonempty" ""
+write_command_result "claude-version" "claude --version" "version" ""
 write_command_result "claude-auth-login-help" "claude auth login --help" "contains" "--claudeai"
 write_command_result "claude-setup-token-help" "claude setup-token --help" "exit0" ""
 write_command_result "codex-version" "codex --version" "nonempty" ""
@@ -166,6 +166,9 @@ const rows = read(commandsPath)
     }
     if (expect === "nonempty" && normalized.length === 0) {
       assertions.push("expected a non-empty version string");
+    }
+    if (expect === "version" && !/[0-9]+(\.[0-9]+)?/.test(normalized)) {
+      assertions.push("expected output to contain a version token");
     }
     if (expect === "contains" && !normalized.includes(contains)) {
       assertions.push(`expected normalized output to contain ${contains}`);
