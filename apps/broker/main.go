@@ -58,6 +58,28 @@ var allowedBinaries = map[string]struct{}{
 
 var commandContext = exec.CommandContext
 
+func resolveWSBinary(requested string) (string, bool) {
+	if requested == "" {
+		return "claude", true
+	}
+	if _, ok := allowedBinaries[requested]; ok {
+		return requested, true
+	}
+	return "", false
+}
+
+func resolveChatBinary(requested string) (string, bool) {
+	if requested == "" {
+		return "claude", true
+	}
+	switch requested {
+	case "claude", "codex":
+		return requested, true
+	default:
+		return "", false
+	}
+}
+
 func brokerToken() string {
 	return os.Getenv("BROKER_TENANT_TOKEN")
 }
@@ -140,11 +162,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	binary := r.URL.Query().Get("binary")
-	if binary == "" {
-		binary = "claude"
-	}
-	if _, ok := allowedBinaries[binary]; !ok {
+	binary, ok := resolveWSBinary(r.URL.Query().Get("binary"))
+	if !ok {
 		jsonError(w, http.StatusBadRequest, "invalid_binary",
 			"binary must be one of claude, codex, bash")
 		return
@@ -577,11 +596,8 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	binary := r.URL.Query().Get("binary")
-	if binary == "" {
-		binary = "claude"
-	}
-	if binary != "claude" && binary != "codex" {
+	binary, ok := resolveChatBinary(r.URL.Query().Get("binary"))
+	if !ok {
 		jsonError(w, http.StatusBadRequest, "invalid_binary",
 			"binary must be claude or codex")
 		return

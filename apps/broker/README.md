@@ -13,8 +13,11 @@ proxy can pipe an xterm.js session through to the user's browser.
 
 - `GET /ws?token=<tenant-token>&binary=<claude|codex|bash>&cwd=<path>`
   Upgrades to a WebSocket, validates the token (constant-time compare),
-  and spawns the requested binary in a PTY. Frames use the binary
-  framing scheme below.
+  and spawns the requested binary in a PTY. Dispatch is driven only by
+  the explicit `binary` query parameter: `claude`, `codex`, and `bash`
+  are accepted as-is; omitted values fall back to `claude`; unknown
+  values are rejected. The broker does not infer mode from env vars such
+  as `MODE` or `BINARY`. Frames use the binary framing scheme below.
 
 - `POST /spawn`
   Headless one-shot. Body:
