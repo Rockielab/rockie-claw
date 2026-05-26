@@ -261,7 +261,7 @@ if (failures.length > 0) {
 }
 fs.writeFileSync(path.join(outputDir, "summary.md"), `${lines.join("\n")}\n`, "utf8");
 
-if (failures.length > 0) {
+if (failures.length > 0 || drift.length > 0) {
   process.exit(1);
 }
 NODE

@@ -126,11 +126,12 @@ jobs:
               node -e '
                 const fs = require("fs");
                 const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
-                const files = [
-                  ...(event.head_commit?.added || []),
-                  ...(event.head_commit?.modified || []),
-                  ...(event.head_commit?.removed || []),
-                ];
+                const commits = event.commits?.length ? event.commits : [event.head_commit || {}];
+                const files = commits.flatMap((commit) => [
+                  ...(commit.added || []),
+                  ...(commit.modified || []),
+                  ...(commit.removed || []),
+                ]);
                 process.stdout.write(files.includes("Dockerfile.multitenant") ? "true" : "false");
               '
             )"

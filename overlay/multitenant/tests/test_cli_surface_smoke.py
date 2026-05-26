@@ -184,6 +184,52 @@ def test_checker_ignores_whitespace_only_drift(tmp_path: Path) -> None:
     assert (tmp_path / "out" / "diff.txt").read_text(encoding="utf-8") == ""
 
 
+def test_checker_fails_on_meaningful_normalized_drift(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "commands": [
+                    {
+                        "id": "claude-auth-login-help",
+                        "output": "Usage: claude auth login [--claudeai]",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    bindir = _fake_cli_bin(tmp_path)
+    (bindir / "claude").write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "--version")
+    printf 'Claude Code 2.1.147\\n'
+    ;;
+  "auth login --help")
+    printf 'Usage: claude auth login [--claudeai] [--new-flag]\\n'
+    ;;
+  "setup-token --help")
+    printf 'Usage: claude setup-token\\n'
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    (bindir / "claude").chmod(0o755)
+
+    result = _run_checker(tmp_path, bindir, "--baseline", str(baseline))
+    assert result.returncode == 1
+    current = json.loads((tmp_path / "out" / "current.json").read_text(encoding="utf-8"))
+    assert current["driftCount"] == 1
+    assert "new-flag" in (tmp_path / "out" / "diff.txt").read_text(encoding="utf-8")
+
+
 def test_runtime_cli_surface_workflow_has_required_triggers_and_side_effects() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     assert "runtime-cli-surface" in workflow
@@ -201,6 +247,7 @@ def test_runtime_cli_surface_workflow_has_required_triggers_and_side_effects() -
     assert "issues.create({" in workflow
     assert "cli-drift" in workflow
     assert "refusing to smoke stale latest" in workflow
+    assert "event.commits" in workflow
 
 
 def test_multitenant_tests_workflow_runs_for_cli_surface_changes() -> None:
