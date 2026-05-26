@@ -188,6 +188,8 @@ def test_runtime_cli_surface_workflow_has_required_triggers_and_side_effects() -
     assert "schedule:" in workflow
     assert "scripts/check-cli-surface.sh" in workflow
     assert "SHOULD_BUILD_PR_IMAGE" in workflow
+    assert "CAN_MUTATE_GITHUB" in workflow
+    assert "CHECKED_SHA" in workflow
     assert "persist-credentials: false" in workflow
     assert "rm -rf vendor/platform-skills/.git" in workflow
     assert "actions/cache/restore" in workflow
