@@ -807,10 +807,12 @@ export async function startGatewayServer(
     resolveStartupChannelRuntime: getStartupChannelRuntime,
     startupTrace,
   });
+  const deferStartupSidecars = opts.deferStartupSidecars === true;
+  const isGatewayStartupPending = () => !startupSidecarsReady && !deferStartupSidecars;
   const getReadiness = createReadinessChecker({
     channelManager,
     startedAt: serverStartedAt,
-    getStartupPending: () => !startupSidecarsReady,
+    getStartupPending: isGatewayStartupPending,
     getStartupPendingReason: () => startupPendingReason,
     getEventLoopHealth: readinessEventLoopHealth.snapshot,
     shouldSkipChannelReadiness: () =>
@@ -1352,7 +1354,7 @@ export async function startGatewayServer(
       rateLimiter: authRateLimiter,
       browserRateLimiter: browserAuthRateLimiter,
       preauthHandshakeTimeoutMs,
-      isStartupPending: () => !startupSidecarsReady,
+      isStartupPending: isGatewayStartupPending,
       gatewayMethods: runtimeState.gatewayMethods,
       events: GATEWAY_EVENTS,
       logGateway: log,
@@ -1458,7 +1460,7 @@ export async function startGatewayServer(
             activateScheduledServicesWhenReady();
           },
           startupTrace,
-          deferSidecars: opts.deferStartupSidecars === true,
+          deferSidecars: deferStartupSidecars,
         }),
       ),
     ));
