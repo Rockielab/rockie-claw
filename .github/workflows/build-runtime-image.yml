@@ -188,3 +188,108 @@ jobs:
           echo "## Cross-repo deploy NOT triggered" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "PLATFORM_CONTEXT_DISPATCH_TOKEN is not set on this repo, so the Hetzner deploy was not auto-triggered. Click 'Run workflow' manually on saml212/platform-context's deploy-hetzner.yml when ready." >> $GITHUB_STEP_SUMMARY
+
+  rollout-tenants:
+    # Step 7 of #816: after the runtime image is pushed to GHCR, roll
+    # every tenant's Fly machine forward to the new SHA so the freshly-
+    # baked-in skills/hooks/overlay are live for users on the next chat
+    # turn — without an operator needing to click anything.
+    #
+    # Calls POST /api/admin/tenants/rollout (shipped 2026-05-29) which
+    # iterates Tenant.get_all(), caps concurrency at 10 Fly Machines
+    # API calls in flight, and reports per-tenant outcomes (updated /
+    # skipped / failed). Idempotent: re-running the same SHA on a
+    # tenant that's already on it is a no-op.
+    #
+    # Both auth gates required:
+    #   X-Admin-Token         = ROCKIELAB_ADMIN_TOKEN env on api host
+    #   Authorization: Bearer = OPEN_NOTEBOOK_PASSWORD env on api host
+    # If either secret is unset on this repo OR the api host, the call
+    # 401s and the rollout is skipped with a clear summary line.
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      API_URL: ${{ secrets.ROCKIELAB_API_URL }}
+      ADMIN_TOKEN: ${{ secrets.ROCKIELAB_ADMIN_TOKEN }}
+      API_PASSWORD: ${{ secrets.ROCKIELAB_API_PASSWORD }}
+    steps:
+      - name: Preflight — required secrets present
+        id: preflight
+        run: |
+          missing=""
+          [ -z "$API_URL" ] && missing="$missing ROCKIELAB_API_URL"
+          [ -z "$ADMIN_TOKEN" ] && missing="$missing ROCKIELAB_ADMIN_TOKEN"
+          [ -z "$API_PASSWORD" ] && missing="$missing ROCKIELAB_API_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::warning::Skipping cross-tenant rollout. Missing secrets on saml212/platform-runtime:$missing"
+            echo "skipped=true" >> $GITHUB_OUTPUT
+            {
+              echo "## Cross-tenant rollout SKIPPED"
+              echo ""
+              echo "Required secrets missing:$missing"
+              echo ""
+              echo "Set them with \`gh secret set <NAME> --repo saml212/platform-runtime --body '<value>'\`."
+              echo ""
+              echo "ROCKIELAB_API_URL: full https url of the api host (e.g. \`https://api.rockielab.com\`)"
+              echo "ROCKIELAB_ADMIN_TOKEN: must match the api host's env"
+              echo "ROCKIELAB_API_PASSWORD: must match OPEN_NOTEBOOK_PASSWORD on the api host"
+            } >> $GITHUB_STEP_SUMMARY
+          else
+            echo "skipped=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Roll every tenant to the new image SHA
+        if: steps.preflight.outputs.skipped == 'false'
+        env:
+          IMAGE_TAG: ghcr.io/saml212/rockielab-runtime-multitenant:${{ github.sha }}
+        run: |
+          # Strip any trailing slash on API_URL.
+          base="${API_URL%/}"
+          echo "POST $base/api/admin/tenants/rollout?image=$IMAGE_TAG"
+
+          response_file=$(mktemp)
+          code=$(curl -sS -o "$response_file" -w "%{http_code}" \
+            -X POST \
+            -H "X-Admin-Token: $ADMIN_TOKEN" \
+            -H "Authorization: Bearer $API_PASSWORD" \
+            -H "Accept: application/json" \
+            "$base/api/admin/tenants/rollout?image=$(printf '%s' "$IMAGE_TAG" | jq -sRr @uri)")
+
+          echo "response code: $code"
+          echo "--- response body ---"
+          cat "$response_file" | jq . 2>/dev/null || cat "$response_file"
+          echo "--- end body ---"
+
+          if [ "$code" != "200" ]; then
+            echo "::error::rollout endpoint returned HTTP $code"
+            exit 1
+          fi
+
+          {
+            echo "## Cross-tenant rollout"
+            echo ""
+            echo "Image: \`$IMAGE_TAG\`"
+            echo ""
+            updated=$(jq -r '.summary.updated // 0' "$response_file")
+            skipped=$(jq -r '.summary.skipped // 0' "$response_file")
+            failed=$(jq -r '.summary.failed // 0' "$response_file")
+            total=$(jq -r '.summary.total // 0' "$response_file")
+            echo "- updated: $updated"
+            echo "- skipped (already on target): $skipped"
+            echo "- failed: $failed"
+            echo "- total tenants seen: $total"
+            if [ "$failed" -gt "0" ]; then
+              echo ""
+              echo "### Failures"
+              echo ""
+              jq -r '.failed[]' "$response_file" | while read tid; do
+                err=$(jq -r ".error_details[\"$tid\"]" "$response_file")
+                echo "- \`$tid\`: $err"
+              done
+            fi
+          } >> $GITHUB_STEP_SUMMARY
+
+          if [ "$(jq -r '.summary.failed // 0' "$response_file")" -gt "0" ]; then
+            echo "::warning::Some tenants failed to roll forward — see summary."
+          fi
