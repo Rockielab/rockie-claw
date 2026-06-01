@@ -14,6 +14,8 @@ self-hosted-runner:
     - blacksmith-16vcpu-ubuntu-2404-arm
     - blacksmith-6vcpu-macos-latest
     - blacksmith-12vcpu-macos-latest
+    # Rockie self-hosted Mac mini runner
+    - rockie
 
 # Ignore patterns for known issues
 paths:
