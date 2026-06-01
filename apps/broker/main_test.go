@@ -220,6 +220,34 @@ func TestSpawnHappyPath(t *testing.T) {
 	}
 }
 
+func TestSpawnForwardsSafeTenantEnvAndBlocksPlatformSecrets(t *testing.T) {
+	setTenantRuntimeEnvForChildProbe(t)
+
+	payload, err := json.Marshal(spawnRequest{
+		Binary:     "bash",
+		Args:       []string{"-c", childEnvProbeShellScript("")},
+		TimeoutSec: 5,
+	})
+	if err != nil {
+		t.Fatalf("marshal spawn request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/spawn?token=tt", strings.NewReader(string(payload)))
+	rec := httptest.NewRecorder()
+	spawnHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp spawnResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad JSON: %v / %s", err, rec.Body.String())
+	}
+	if resp.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d stderr=%q", resp.ExitCode, resp.Stderr)
+	}
+	assertTenantRuntimeProbe(t, parseProbeLines(resp.Stdout))
+}
+
 func TestSpawnBashInjectsResolvedTenantSecretEnvAndRedactsOutput(t *testing.T) {
 	setBrokerTestEnv(t, "tt")
 	secretValue := "CANARY_SECRET_VALUE_abcdef"
@@ -340,9 +368,16 @@ func TestCodexChatHandlerPassesThroughResumeJSONL(t *testing.T) {
 	}
 }
 
+func TestChatHandlerForwardsSafeTenantEnvAndBlocksPlatformSecrets(t *testing.T) {
+	setTenantRuntimeEnvForChildProbe(t)
+	record := runCodexChatWithRecordedCommand(t, `{"prompt":"check env","timeout":1}`)
+	assertTenantRuntimeProbe(t, record.EnvProbe)
+}
+
 type recordedCommand struct {
-	Name string   `json:"name"`
-	Args []string `json:"args"`
+	Name     string            `json:"name"`
+	Args     []string          `json:"args"`
+	EnvProbe map[string]string `json:"env_probe,omitempty"`
 }
 
 func runCodexChatWithRecordedCommand(t *testing.T, requestBody string) recordedCommand {
@@ -409,8 +444,9 @@ func TestBrokerCommandHelperProcess(t *testing.T) {
 		os.Exit(2)
 	}
 	record := recordedCommand{
-		Name: helperArgs[2],
-		Args: append([]string(nil), helperArgs[3:]...),
+		Name:     helperArgs[2],
+		Args:     append([]string(nil), helperArgs[3:]...),
+		EnvProbe: childEnvProbe(),
 	}
 	bs, err := json.Marshal(record)
 	if err != nil {
@@ -421,6 +457,121 @@ func TestBrokerCommandHelperProcess(t *testing.T) {
 	}
 	_, _ = os.Stdout.WriteString(helperArgs[1])
 	os.Exit(0)
+}
+
+func setTenantRuntimeEnvForChildProbe(t *testing.T) {
+	t.Helper()
+	setBrokerTestEnv(t, "tt")
+	t.Setenv("ROCKIELAB_TENANT_TOKEN", "tenant-service-token")
+	t.Setenv("ROCKIELAB_API_BASE", "https://api.rockielab.test/")
+	t.Setenv("BINARY", "codex")
+	t.Setenv("ROCKIELAB_API_PASSWORD", "platform-api-password")
+	t.Setenv("OPENAI_API_KEY", "sk-platform-secret")
+	t.Setenv("RUNPOD_API_KEY", "runpod-platform-secret")
+}
+
+func childEnvProbe() map[string]string {
+	token := os.Getenv("ROCKIELAB_TENANT_TOKEN")
+	tenantID := os.Getenv("ROCKIELAB_TENANT_ID")
+	return map[string]string{
+		"has_token":            yesNo(token != ""),
+		"token_distinct":       yesNo(token != "" && token != tenantID),
+		"tenant_id":            yesNo(tenantID != ""),
+		"api_url":              os.Getenv("ROCKIELAB_API_URL"),
+		"binary":               os.Getenv("BINARY"),
+		"broker_token_present": yesNo(os.Getenv("BROKER_TENANT_TOKEN") != ""),
+		"api_password_present": yesNo(os.Getenv("ROCKIELAB_API_PASSWORD") != ""),
+		"openai_key_present":   yesNo(os.Getenv("OPENAI_API_KEY") != ""),
+		"provider_key_present": yesNo(os.Getenv("RUNPOD_API_KEY") != ""),
+	}
+}
+
+func yesNo(ok bool) string {
+	if ok {
+		return "yes"
+	}
+	return "no"
+}
+
+func childEnvProbeShellScript(outputPath string) string {
+	redirect := ""
+	if outputPath != "" {
+		redirect = " > " + shellSingleQuote(outputPath)
+	}
+	return `yn() {
+  if [ -n "$1" ]; then printf yes; else printf no; fi
+}
+{
+  printf 'has_token=%s\n' "$(yn "${ROCKIELAB_TENANT_TOKEN:-}")"
+  if [ -n "${ROCKIELAB_TENANT_TOKEN:-}" ] && [ "${ROCKIELAB_TENANT_TOKEN:-}" != "${ROCKIELAB_TENANT_ID:-}" ]; then
+    printf 'token_distinct=yes\n'
+  else
+    printf 'token_distinct=no\n'
+  fi
+  printf 'tenant_id=%s\n' "$(yn "${ROCKIELAB_TENANT_ID:-}")"
+  printf 'api_url=%s\n' "${ROCKIELAB_API_URL:-}"
+  printf 'binary=%s\n' "${BINARY:-}"
+  printf 'broker_token_present=%s\n' "$(yn "${BROKER_TENANT_TOKEN:-}")"
+  printf 'api_password_present=%s\n' "$(yn "${ROCKIELAB_API_PASSWORD:-}")"
+  printf 'openai_key_present=%s\n' "$(yn "${OPENAI_API_KEY:-}")"
+  printf 'provider_key_present=%s\n' "$(yn "${RUNPOD_API_KEY:-}")"
+}` + redirect + "\n"
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func parseProbeLines(output string) map[string]string {
+	probe := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if line == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		probe[key] = value
+	}
+	return probe
+}
+
+func assertTenantRuntimeProbe(t *testing.T, probe map[string]string) {
+	t.Helper()
+	want := map[string]string{
+		"has_token":            "yes",
+		"token_distinct":       "yes",
+		"tenant_id":            "yes",
+		"api_url":              "https://api.rockielab.test",
+		"binary":               "codex",
+		"broker_token_present": "no",
+		"api_password_present": "no",
+		"openai_key_present":   "no",
+		"provider_key_present": "no",
+	}
+	for key, value := range want {
+		if probe[key] != value {
+			t.Fatalf("env probe %s = %q, want %q; full probe=%v", key, probe[key], value, probe)
+		}
+	}
+}
+
+func waitForProbeFile(t *testing.T, path string) map[string]string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		bs, err := os.ReadFile(path)
+		if err == nil && len(bs) > 0 {
+			probe := parseProbeLines(string(bs))
+			if probe["provider_key_present"] != "" {
+				return probe
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for env probe file %s", path)
+	return nil
 }
 
 func TestFlattenHistory(t *testing.T) {

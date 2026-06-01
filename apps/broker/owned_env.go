@@ -82,6 +82,9 @@ func ownedChildEnv() []string {
 		allowed = append(allowed, name)
 	}
 	copyAllowedEnv(env, allowed)
+	if env["ROCKIELAB_API_URL"] == "" && env["ROCKIELAB_API_BASE"] != "" {
+		env["ROCKIELAB_API_URL"] = strings.TrimRight(env["ROCKIELAB_API_BASE"], "/")
+	}
 	if env["PATH"] == "" {
 		env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	}

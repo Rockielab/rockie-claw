@@ -179,6 +179,31 @@ func TestSessionPoolReuseAndRespawn(t *testing.T) {
 	}
 }
 
+func TestSpawnSessionForwardsSafeTenantEnvAndBlocksPlatformSecrets(t *testing.T) {
+	setTenantRuntimeEnvForChildProbe(t)
+
+	binDir := t.TempDir()
+	probePath := binDir + "/env-probe.txt"
+	script := "#!/bin/sh\n" +
+		childEnvProbeShellScript(probePath) +
+		"printf '%s\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"SID\"}'\n" +
+		"while IFS= read -r _line; do printf '%s\n' '{\"type\":\"result\",\"is_error\":false,\"stop_reason\":\"end_turn\"}'; done\n"
+	if err := os.WriteFile(binDir+"/claude", []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sess, err := spawnSession(ctx, "00000000-0000-4000-8000-000000000001", "claude", binDir)
+	if err != nil {
+		t.Fatalf("spawn session: %v", err)
+	}
+	defer sess.kill()
+
+	assertTenantRuntimeProbe(t, waitForProbeFile(t, probePath))
+}
+
 func TestSessionPoolReapsIdle(t *testing.T) {
 	p := &sessionPool{sessions: make(map[string]*ptySession), spawnFn: stubSpawn(t)}
 	defer p.shutdown()
