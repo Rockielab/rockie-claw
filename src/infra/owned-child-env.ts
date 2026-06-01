@@ -27,6 +27,7 @@ const ALLOWED_EXACT = new Set([
   "OPENCLAW_SERVICE_MARKER",
   "ROCKIELAB_API_BASE",
   "ROCKIELAB_TENANT_ID",
+  "ROCKIELAB_TENANT_TOKEN",
   "BROKER_PORT",
 ]);
 
@@ -37,7 +38,6 @@ const BLOCKED_NAME_RE =
 export type OwnedChildEnvOptions = {
   baseEnv?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   overrides?: NodeJS.ProcessEnv | Record<string, string | undefined>;
-  includeTenantTokenCompat?: boolean;
 };
 
 function isAllowedName(name: string): boolean {
@@ -61,7 +61,7 @@ function assignAllowed(
     if (!isAllowedName(key)) {
       continue;
     }
-    if (BLOCKED_NAME_RE.test(key)) {
+    if (key !== "ROCKIELAB_TENANT_TOKEN" && BLOCKED_NAME_RE.test(key)) {
       continue;
     }
     out[key] = value;
@@ -77,9 +77,6 @@ export function buildOwnedChildEnv(options: OwnedChildEnvOptions = {}): NodeJS.P
   const tenantId = options.overrides?.ROCKIELAB_TENANT_ID ?? baseEnv.ROCKIELAB_TENANT_ID;
   if (tenantId?.trim()) {
     out.ROCKIELAB_TENANT_ID = tenantId.trim();
-    if (options.includeTenantTokenCompat !== false) {
-      out.ROCKIELAB_TENANT_TOKEN = tenantId.trim();
-    }
   }
   return out;
 }
