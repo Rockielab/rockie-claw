@@ -123,7 +123,9 @@ RUN chmod +x /usr/local/bin/assemble-skills.sh && \
 # ── Stage 4b: Build the PTY-WebSocket broker (Go) ──────────────────
 # Small static binary that bridges xterm.js <-> claude/codex/bash PTYs.
 # See apps/broker/README.md for the wire protocol.
-FROM golang:1.23-bookworm AS broker-build
+FROM --platform=$BUILDPLATFORM golang:1.23-bookworm AS broker-build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY apps/broker/go.mod apps/broker/go.sum ./
 RUN --mount=type=cache,id=broker-go-mod,target=/go/pkg/mod,sharing=locked \
@@ -131,7 +133,8 @@ RUN --mount=type=cache,id=broker-go-mod,target=/go/pkg/mod,sharing=locked \
 COPY apps/broker/ ./
 RUN --mount=type=cache,id=broker-go-mod,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,id=broker-go-build,target=/root/.cache/go-build,sharing=locked \
-    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/broker .
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} GOFLAGS="-p=1" \
+      go build -ldflags="-s -w" -o /out/broker .
 
 # ── Stage 5: Final multitenant runtime image ───────────────────────
 FROM ${OPENCLAW_NODE_BOOKWORM_SLIM_IMAGE}

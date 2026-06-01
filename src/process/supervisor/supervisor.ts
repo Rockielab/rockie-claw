@@ -132,7 +132,9 @@ export function createProcessSupervisor(): ProcessSupervisor {
       if (input.mode === "child" && input.argv.length === 0) {
         throw new Error("spawn argv cannot be empty");
       }
-      assertOwnedChildEnv(input.env, "process supervisor spawn");
+      assertOwnedChildEnv(input.env, "process supervisor spawn", {
+        allowedSecretLikeKeys: input.allowedSecretEnvNames,
+      });
       const adapter =
         input.mode === "pty"
           ? await (async () => {
@@ -146,6 +148,7 @@ export function createProcessSupervisor(): ProcessSupervisor {
                 args: [...shellArgs, ptyCommand],
                 cwd: input.cwd,
                 env: input.env,
+                allowedSecretEnvNames: input.allowedSecretEnvNames,
               });
             })()
           : await createChildAdapter({
@@ -155,6 +158,7 @@ export function createProcessSupervisor(): ProcessSupervisor {
               windowsVerbatimArguments: input.windowsVerbatimArguments,
               input: input.input,
               stdinMode: input.stdinMode,
+              allowedSecretEnvNames: input.allowedSecretEnvNames,
             });
 
       registry.updateState(runId, "running", { pid: adapter.pid });

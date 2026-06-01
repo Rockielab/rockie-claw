@@ -61,23 +61,38 @@ describe("exec platform secret runtime", () => {
     });
   });
 
-  it("rejects stored secret references outside the broker-native exact form", async () => {
+  it("injects stored secret refs into gateway subprocess env and redacts output", async () => {
+    const secretValue = "sk-test-canary-secret";
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        jsonResponse({
-          known: { OPENAI_API_KEY: { category: "api_key" } },
-          unknown: [],
-        }),
-      ),
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.endsWith("/api/secrets/metadata")) {
+          return jsonResponse({
+            known: { OPENAI_API_KEY: { category: "api_key" } },
+            unknown: [],
+          });
+        }
+        if (url.endsWith("/api/secrets/resolve")) {
+          return jsonResponse({
+            resolved: { OPENAI_API_KEY: secretValue },
+            categories: { OPENAI_API_KEY: "api_key" },
+            missing: [],
+          });
+        }
+        throw new Error(`unexpected URL: ${url}`);
+      }),
     );
 
     const tool = createExecTool({ host: "gateway", security: "full", ask: "off" });
-    await expect(
-      tool.execute("secret-reject", {
-        command: "printf %s $OPENAI_API_KEY",
-      }),
-    ).rejects.toThrow(/Secret references are only allowed in exact broker-native form/);
+    const result = await tool.execute("secret-inject", {
+      command: "printf %s $OPENAI_API_KEY",
+    });
+
+    const text = result.content.find((entry) => entry.type === "text")?.text ?? "";
+    expect(text).toContain("<redacted:OPENAI_API_KEY>");
+    expect(text).not.toContain(secretValue);
+    expect(text).not.toContain("sk-test");
   });
 
   it("rejects platform-secret sandbox commands before backend materialization", async () => {
@@ -107,7 +122,7 @@ describe("exec platform secret runtime", () => {
       tool.execute("secret-ssh-reject", {
         command: "printf %s $DEPLOY_KEY",
       }),
-    ).rejects.toThrow(/Secret references are only allowed in exact broker-native form/);
+    ).rejects.toThrow(/Stored secret references are only supported in gateway bash subprocess/);
     expect(buildExecSpec).not.toHaveBeenCalled();
   });
 });

@@ -50,6 +50,10 @@ func TestParseExactEchoHeadCommand(t *testing.T) {
 	if got.Name != "DEPLOY_KEY" || got.Count != 4 {
 		t.Fatalf("unexpected parse result: %+v", got)
 	}
+	got, ok = parseExactEchoHeadCommand(" echo   ${DEPLOY_KEY} | head -c 4 ")
+	if !ok || got.Name != "DEPLOY_KEY" || got.Count != 4 {
+		t.Fatalf("unexpected braced parse result: %+v ok=%v", got, ok)
+	}
 	for _, command := range []string{
 		"echo '$DEPLOY_KEY' | head -c 4",
 		"FOO=1 echo $DEPLOY_KEY | head -c 4",
@@ -102,14 +106,42 @@ func TestSecretAwareSpawnExactFormReturnsOnlyMarker(t *testing.T) {
 	}
 }
 
-func TestSecretAwareSpawnRejectsDisallowedKnownSecretUse(t *testing.T) {
+func TestSecretAwareSpawnLeavesNonExactKnownSecretUseForEnvInjection(t *testing.T) {
 	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
 	withStubSecretsClient(t, stubSecretsClient{
 		metadata: map[string]string{"DEPLOY_KEY": "ssh_key"},
 	})
 	_, handled, err := executeSecretAwareSpawnCommand(context.Background(), "printf %s $DEPLOY_KEY")
-	if !handled || err == nil {
-		t.Fatalf("expected disallowed secret reference rejection, handled=%v err=%v", handled, err)
+	if handled || err != nil {
+		t.Fatalf("expected non-exact secret reference to fall through, handled=%v err=%v", handled, err)
+	}
+}
+
+func TestResolveSecretEnvForSpawnCommandMaterializesKnownRefs(t *testing.T) {
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
+	secretValue := "CANARY_SECRET_VALUE_abcdef"
+	withStubSecretsClient(t, stubSecretsClient{
+		metadata: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		resolved: resolvedSecretSet{
+			Values:     map[string]string{"DEPLOY_KEY": secretValue},
+			Categories: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		},
+	})
+	resolved, handled, err := resolveSecretEnvForSpawnCommand(
+		context.Background(),
+		`mkdir -p ~/.ssh && printf '%s' "$DEPLOY_KEY" > ~/.ssh/deploy_key`,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected known secret ref to be resolved for bash env injection")
+	}
+	if resolved.Values["DEPLOY_KEY"] != secretValue {
+		t.Fatalf("unexpected resolved value map: %v", resolved.Values)
+	}
+	if got := resolved.Redactor.Redact("prefix " + secretValue); strings.Contains(got, secretValue) {
+		t.Fatalf("redactor leaked secret value: %q", got)
 	}
 }
 
@@ -136,12 +168,14 @@ func TestValidateResolvedExactSetRejectsBadEnvelope(t *testing.T) {
 	}
 }
 
-func TestOwnedChildEnvDropsSecretsAndDerivesTenantTokenFromTenantID(t *testing.T) {
+func TestOwnedChildEnvDropsSecretsAndForwardsTenantRuntimeContext(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin")
 	t.Setenv("HOME", "/home/runtime")
 	t.Setenv("BROKER_TENANT_TOKEN", "broker-secret")
 	t.Setenv("OPENAI_API_KEY", "sk-secret")
-	t.Setenv("ROCKIELAB_TENANT_TOKEN", "legacy-token")
+	t.Setenv("ROCKIELAB_API_URL", "https://api.rockielab.test")
+	t.Setenv("BINARY", "codex")
+	t.Setenv("ROCKIELAB_TENANT_TOKEN", "service-token")
 	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-123")
 	env := ownedChildEnv()
 	if envContainsName(env, "BROKER_TENANT_TOKEN") || envContainsName(env, "OPENAI_API_KEY") {
@@ -150,14 +184,35 @@ func TestOwnedChildEnvDropsSecretsAndDerivesTenantTokenFromTenantID(t *testing.T
 	if !envContainsName(env, "ROCKIELAB_TENANT_ID") {
 		t.Fatalf("owned child env missing tenant id: %v", env)
 	}
-	foundDerived := false
-	for _, kv := range env {
-		if kv == "ROCKIELAB_TENANT_TOKEN=tenant-123" {
-			foundDerived = true
+	for _, want := range []string{
+		"ROCKIELAB_TENANT_TOKEN=service-token",
+		"ROCKIELAB_API_URL=https://api.rockielab.test",
+		"BINARY=codex",
+	} {
+		found := false
+		for _, kv := range env {
+			if kv == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("owned child env missing %q: %v", want, env)
 		}
 	}
-	if !foundDerived {
-		t.Fatalf("owned child env should derive tenant token only from tenant id: %v", env)
+	for _, kv := range env {
+		if kv == "ROCKIELAB_TENANT_TOKEN=tenant-123" {
+			t.Fatalf("owned child env must not alias tenant token to tenant id: %v", env)
+		}
+	}
+}
+
+func TestOwnedChildEnvDoesNotInventTenantToken(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	t.Setenv("HOME", "/home/runtime")
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-123")
+	env := ownedChildEnv()
+	if envContainsName(env, "ROCKIELAB_TENANT_TOKEN") {
+		t.Fatalf("owned child env must not invent tenant token from tenant id: %v", env)
 	}
 }
 
@@ -220,7 +275,16 @@ func TestOwnedChildEnvStillBlocksPlatformSecretsAlongsideConnectionCreds(t *test
 // a future regex tweak or allowlist edit can't silently change which
 // names reach the agent.
 func TestIsEnvNameAllowedForChild(t *testing.T) {
-	allowed := []string{"PATH", "HOME", "ROCKIELAB_TENANT_ID", "ROCKIELAB_TENANT_TOKEN", "GH_TOKEN", "HF_TOKEN"}
+	allowed := []string{
+		"PATH",
+		"HOME",
+		"ROCKIELAB_TENANT_ID",
+		"ROCKIELAB_TENANT_TOKEN",
+		"ROCKIELAB_API_URL",
+		"BINARY",
+		"GH_TOKEN",
+		"HF_TOKEN",
+	}
 	for _, name := range allowed {
 		if !isEnvNameAllowedForChild(name) {
 			t.Fatalf("%q must be allowed for the child env", name)

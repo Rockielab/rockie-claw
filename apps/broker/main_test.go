@@ -220,6 +220,39 @@ func TestSpawnHappyPath(t *testing.T) {
 	}
 }
 
+func TestSpawnBashInjectsResolvedTenantSecretEnvAndRedactsOutput(t *testing.T) {
+	setBrokerTestEnv(t, "tt")
+	secretValue := "CANARY_SECRET_VALUE_abcdef"
+	withStubSecretsClient(t, stubSecretsClient{
+		metadata: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		resolved: resolvedSecretSet{
+			Values:     map[string]string{"DEPLOY_KEY": secretValue},
+			Categories: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		},
+	})
+	body := strings.NewReader(`{"binary":"bash","args":["-c","test -n \"$DEPLOY_KEY\" && printf '%s' \"$DEPLOY_KEY\""],"timeout_sec":5}`)
+	req := httptest.NewRequest(http.MethodPost, "/spawn?token=tt", body)
+	rec := httptest.NewRecorder()
+	spawnHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp spawnResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad JSON: %v / %s", err, rec.Body.String())
+	}
+	if resp.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d stderr=%q", resp.ExitCode, resp.Stderr)
+	}
+	if strings.Contains(resp.Stdout, secretValue) || strings.Contains(resp.Stdout, secretValue[:6]) {
+		t.Fatalf("secret value leaked in stdout: %q", resp.Stdout)
+	}
+	if !strings.Contains(resp.Stdout, "<redacted:DEPLOY_KEY>") {
+		t.Fatalf("expected redacted marker in stdout, got %q", resp.Stdout)
+	}
+}
+
 // TestPTYFramingRoundtrip exercises /ws end-to-end against `bash` and
 // validates the framing scheme: stdin frame in, stdout frame out, exit
 // frame at the end. This is the "one PTY framing roundtrip with a mocked
@@ -481,7 +514,7 @@ func TestPTYFramingRoundtrip(t *testing.T) {
 	}
 }
 
-func TestWSBinaryQueryDispatchIgnoresEnvAndDefaultsToClaude(t *testing.T) {
+func TestWSBinaryQueryDispatchUsesQueryButForwardsRuntimeBinaryEnv(t *testing.T) {
 	setBrokerTestEnv(t, "tt")
 	t.Setenv("MODE", "subscription")
 	t.Setenv("BINARY", "codex")
@@ -521,8 +554,8 @@ func TestWSBinaryQueryDispatchIgnoresEnvAndDefaultsToClaude(t *testing.T) {
 			if !strings.Contains(gotStdout, "BINARY=") {
 				t.Fatalf("expected BINARY probe output, got %q", gotStdout)
 			}
-			if strings.Contains(gotStdout, "\nBINARY=codex") || strings.HasPrefix(gotStdout, "BINARY=codex") {
-				t.Fatalf("expected broker child env to ignore BINARY, got %q", gotStdout)
+			if !strings.Contains(gotStdout, "\nBINARY=codex") && !strings.HasPrefix(gotStdout, "BINARY=codex") {
+				t.Fatalf("expected broker child env to forward runtime BINARY, got %q", gotStdout)
 			}
 			if gotExit != 0 {
 				t.Fatalf("expected exit 0, got %d stdout=%q", gotExit, gotStdout)

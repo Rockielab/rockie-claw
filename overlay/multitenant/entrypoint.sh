@@ -31,15 +31,18 @@ export ROCKIELAB_API_URL="${ROCKIELAB_API_URL:-${ROCKIELAB_API_BASE}}"
 export OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-${PLATFORM_TARGET_DIR:-${TARGET_DIR:-/home/runtime}}}"
 export OPENCLAW_SKILLS_DIR="${OPENCLAW_SKILLS_DIR:-${HOME:-/home/runtime}/.claude/skills}"
 # ROCKIELAB_TENANT_ID is tenant identity. ROCKIELAB_TENANT_TOKEN is the
-# service/dev auth token sent as X-Tenant-Token. Runtime clients send
-# both X-Tenant-Token and X-Tenant-Id so auth and tenant scoping stay
-# separate.
+# tenant-scoped service/dev auth token sent as X-Tenant-Token. Runtime
+# clients send both X-Tenant-Token and X-Tenant-Id so auth and tenant
+# scoping stay separate. Do not alias the token to the id here: the PTY
+# broker inherits this PID-1 env before SSH sessions are created, so
+# aliasing breaks chat-spawned runtime API calls even when Fly SSH sees
+# the correct secret later.
 if [ -z "${ROCKIELAB_TENANT_ID:-}" ]; then
   printf '[entrypoint] ERROR: ROCKIELAB_TENANT_ID is required\n' >&2
   exit 1
 fi
 if [ -z "${ROCKIELAB_TENANT_TOKEN:-}" ]; then
-  printf '[entrypoint] WARN: ROCKIELAB_TENANT_TOKEN unset; token-gated platform APIs may 401\n' >&2
+  printf '[entrypoint] WARN: ROCKIELAB_TENANT_TOKEN is unset; token-gated platform APIs may 401\n' >&2
 fi
 # OpenClaw gateway needs to listen on the Fly machine's external
 # interface so platform-context can HTTP-proxy to it through the

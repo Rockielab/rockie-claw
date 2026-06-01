@@ -39,6 +39,13 @@ ENTRYPOINT = OVERLAY / "entrypoint.sh"
 TEMPLATE = OVERLAY / "settings.json.j2"
 
 
+def test_entrypoint_does_not_alias_tenant_token_to_tenant_id() -> None:
+    src = ENTRYPOINT.read_text(encoding="utf-8")
+
+    assert 'export ROCKIELAB_TENANT_TOKEN="$ROCKIELAB_TENANT_ID"' not in src
+    assert "ROCKIELAB_TENANT_TOKEN is unset" in src
+
+
 def _extract_function(name: str) -> str:
     """Return the body of a top-level shell function from entrypoint.sh.
 

@@ -51,13 +51,16 @@ export async function createPtyAdapter(params: {
   cols?: number;
   rows?: number;
   name?: string;
+  allowedSecretEnvNames?: readonly string[];
 }): Promise<PtyAdapter> {
   const module = await loadPtyModule();
   const spawn = module.spawn ?? module.default?.spawn;
   if (!spawn) {
     throw new Error("PTY support is unavailable (node-pty spawn not found).");
   }
-  assertOwnedChildEnv(params.env, "createPtyAdapter");
+  assertOwnedChildEnv(params.env, "createPtyAdapter", {
+    allowedSecretLikeKeys: params.allowedSecretEnvNames,
+  });
   const baseEnv = params.env ? toStringEnv(params.env) : undefined;
   const preparedSpawn = prepareOomScoreAdjustedSpawn(params.shell, params.args, { env: baseEnv });
   const pty = spawn(preparedSpawn.command, preparedSpawn.args, {

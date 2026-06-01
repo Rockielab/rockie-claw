@@ -420,6 +420,8 @@ func spawnHandler(w http.ResponseWriter, r *http.Request) {
 		req.Cwd = os.Getenv("HOME")
 	}
 
+	var commandSecrets resolvedCommandSecrets
+	var hasCommandSecrets bool
 	if req.Binary == "bash" && len(req.Args) == 2 && req.Args[0] == "-c" {
 		if resp, handled, err := executeSecretAwareSpawnCommand(r.Context(), req.Args[1]); handled || err != nil {
 			if err != nil {
@@ -430,6 +432,16 @@ func spawnHandler(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(resp)
 			log("spawn: exact secret form accepted name=redacted")
 			return
+		}
+		resolved, handled, err := resolveSecretEnvForSpawnCommand(r.Context(), req.Args[1])
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, "secret_command_rejected", err.Error())
+			return
+		}
+		if handled {
+			commandSecrets = resolved
+			hasCommandSecrets = true
+			defer commandSecrets.Redactor.Close()
 		}
 	} else if err := rejectDisallowedSecretReferences(r.Context(), strings.Join(req.Args, " ")); err != nil {
 		jsonError(w, http.StatusBadRequest, "secret_command_rejected", err.Error())
@@ -443,6 +455,11 @@ func spawnHandler(w http.ResponseWriter, r *http.Request) {
 	cmd := exec.CommandContext(ctx, req.Binary, req.Args...)
 	cmd.Dir = req.Cwd
 	cmd.Env = ownedChildEnv()
+	if hasCommandSecrets {
+		for name, value := range commandSecrets.Values {
+			cmd.Env = append(cmd.Env, name+"="+value)
+		}
+	}
 
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -452,6 +469,10 @@ func spawnHandler(w http.ResponseWriter, r *http.Request) {
 	resp := spawnResponse{
 		Stdout: stdout.String(),
 		Stderr: stderr.String(),
+	}
+	if hasCommandSecrets {
+		resp.Stdout = commandSecrets.Redactor.Redact(resp.Stdout)
+		resp.Stderr = commandSecrets.Redactor.Redact(resp.Stderr)
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		resp.TimedOut = true
@@ -467,7 +488,11 @@ func spawnHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 
-	log("spawn: binary=%s args=%v exit=%d timed_out=%v", req.Binary, req.Args, resp.ExitCode, resp.TimedOut)
+	if hasCommandSecrets {
+		log("spawn: binary=%s args=%v exit=%d timed_out=%v secret_env=resolved", req.Binary, req.Args, resp.ExitCode, resp.TimedOut)
+	} else {
+		log("spawn: binary=%s args=%v exit=%d timed_out=%v", req.Binary, req.Args, resp.ExitCode, resp.TimedOut)
+	}
 }
 
 // chatRequest is the JSON body for POST /chat.
