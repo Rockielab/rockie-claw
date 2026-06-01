@@ -12,7 +12,8 @@
  *
  *   ROCKIELAB_API_BASE          (default https://api.rockielab.com)
  *   ROCKIELAB_API_PASSWORD      (mirrors OPEN_NOTEBOOK_PASSWORD)
- *   ROCKIELAB_TENANT_DEV_TOKEN  (per-tenant; eventually a signed JWT)
+ *   ROCKIELAB_TENANT_DEV_TOKEN  (service/dev auth token)
+ *   ROCKIELAB_TENANT_ID         (tenant identity)
  *
  * Registered into ~/.claude/mcp.json + ~/.codex/mcp.json at image
  * build time (see Dockerfile.multitenant + assemble-skills.sh).
@@ -25,6 +26,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 const API_BASE = process.env.ROCKIELAB_API_BASE || "https://api.rockielab.com";
 const API_PASSWORD = process.env.ROCKIELAB_API_PASSWORD || process.env.OPEN_NOTEBOOK_PASSWORD || "";
 const TENANT_TOKEN = process.env.ROCKIELAB_TENANT_DEV_TOKEN || "";
+const TENANT_ID = process.env.ROCKIELAB_TENANT_ID || "";
 
 // Tool catalog. Keep in lockstep with
 // platform-context/api/agent_tools/schemas.py. A parity test in
@@ -564,6 +566,7 @@ function authHeaders() {
   const h = { "Content-Type": "application/json" };
   if (API_PASSWORD) h["Authorization"] = `Bearer ${API_PASSWORD}`;
   if (TENANT_TOKEN) h["X-Tenant-Token"] = TENANT_TOKEN;
+  if (TENANT_ID) h["X-Tenant-Id"] = TENANT_ID;
   return h;
 }
 
