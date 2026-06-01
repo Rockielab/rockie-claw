@@ -27,20 +27,22 @@ MODE="${MODE:-byok}"
 # ROCKIELAB_API_BASE defaults to the prod control-plane; per-tenant Fly
 # env can override (e.g. https://api.dev.rockielab.com).
 export ROCKIELAB_API_BASE="${ROCKIELAB_API_BASE:-https://api.rockielab.com}"
+export ROCKIELAB_API_URL="${ROCKIELAB_API_URL:-${ROCKIELAB_API_BASE}}"
 export OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-${PLATFORM_TARGET_DIR:-${TARGET_DIR:-/home/runtime}}}"
 export OPENCLAW_SKILLS_DIR="${OPENCLAW_SKILLS_DIR:-${HOME:-/home/runtime}/.claude/skills}"
-# ROCKIELAB_TENANT_ID is the tenant scope. ROCKIELAB_TENANT_TOKEN is the
-# tenant-scoped service token used by rockie-gpu / mcp-rockie as
-# X-Tenant-Token. Do not alias the token to the id here: the PTY broker
-# inherits this PID-1 env before SSH sessions are created, so aliasing
-# breaks every chat-spawned runtime API call even when Fly SSH sees the
-# correct secret later.
+# ROCKIELAB_TENANT_ID is tenant identity. ROCKIELAB_TENANT_TOKEN is the
+# tenant-scoped service/dev auth token sent as X-Tenant-Token. Runtime
+# clients send both X-Tenant-Token and X-Tenant-Id so auth and tenant
+# scoping stay separate. Do not alias the token to the id here: the PTY
+# broker inherits this PID-1 env before SSH sessions are created, so
+# aliasing breaks chat-spawned runtime API calls even when Fly SSH sees
+# the correct secret later.
 if [ -z "${ROCKIELAB_TENANT_ID:-}" ]; then
   printf '[entrypoint] ERROR: ROCKIELAB_TENANT_ID is required\n' >&2
   exit 1
 fi
 if [ -z "${ROCKIELAB_TENANT_TOKEN:-}" ]; then
-  printf '[entrypoint] WARN: ROCKIELAB_TENANT_TOKEN is unset; tenant runtime API calls will fail\n' >&2
+  printf '[entrypoint] WARN: ROCKIELAB_TENANT_TOKEN is unset; token-gated platform APIs may 401\n' >&2
 fi
 # OpenClaw gateway needs to listen on the Fly machine's external
 # interface so platform-context can HTTP-proxy to it through the
@@ -353,7 +355,8 @@ EOF
     # We point at the same `/home/runtime/mcp-rockie/server.js` binary
     # that the subscription paths register via Dockerfile.multitenant.
     # mcp-rockie is stdio-only and reads ROCKIELAB_API_BASE,
-    # ROCKIELAB_TENANT_DEV_TOKEN, ROCKIELAB_API_PASSWORD from env. We
+    # ROCKIELAB_TENANT_DEV_TOKEN, ROCKIELAB_TENANT_ID, and
+    # ROCKIELAB_API_PASSWORD from env. We
     # set the env map explicitly (rather than relying on process-env
     # inheritance) for parity with the subscription mcp.json payload.
     #
@@ -372,7 +375,9 @@ EOF
       MCP_SERVERS_JSON=$(jq -n \
         --arg bin "$MCP_ROCKIE_BIN" \
         --arg api_base "${ROCKIELAB_API_BASE:-}" \
+        --arg api_url "${ROCKIELAB_API_URL:-}" \
         --arg tenant_token "${ROCKIELAB_TENANT_TOKEN:-}" \
+        --arg tenant_id "${ROCKIELAB_TENANT_ID:-}" \
         --arg password "${OPEN_NOTEBOOK_PASSWORD:-}" \
         '{
           rockie: {
@@ -380,7 +385,9 @@ EOF
             args: [$bin],
             env: {
               ROCKIELAB_API_BASE: $api_base,
+              ROCKIELAB_API_URL: $api_url,
               ROCKIELAB_TENANT_DEV_TOKEN: $tenant_token,
+              ROCKIELAB_TENANT_ID: $tenant_id,
               ROCKIELAB_API_PASSWORD: $password
             }
           }

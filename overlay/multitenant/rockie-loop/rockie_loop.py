@@ -30,7 +30,8 @@ freshest queue activity. The lab list comes from
 Reads two env vars set by `overlay/multitenant/entrypoint.sh`:
 
   ROCKIELAB_API_BASE        — e.g. https://api.rockielab.com
-  ROCKIELAB_TENANT_ID       — passed as X-Tenant-Token
+  ROCKIELAB_TENANT_TOKEN    — passed as X-Tenant-Token for auth
+  ROCKIELAB_TENANT_ID       — passed as X-Tenant-Id for tenant scope
 
 And the broker is on localhost (same Fly machine):
 
@@ -75,7 +76,8 @@ from typing import Any, Optional
 DEFAULT_API_BASE = os.environ.get(
     "ROCKIELAB_API_BASE", "https://api.rockielab.com"
 )
-TENANT_TOKEN = os.environ.get("ROCKIELAB_TENANT_ID", "").strip()
+TENANT_TOKEN = os.environ.get("ROCKIELAB_TENANT_TOKEN", "").strip()
+TENANT_ID = os.environ.get("ROCKIELAB_TENANT_ID", "").strip()
 # Bearer for PasswordAuthMiddleware on platform-context. Mirrors the
 # env-var fallback chain mcp-rockie uses.
 API_PASSWORD = os.environ.get("ROCKIELAB_API_PASSWORD") or os.environ.get(
@@ -139,7 +141,7 @@ def _build_request(
     # at the global layer with the API password and at the tenant
     # layer with X-Tenant-Token. Without Authorization every call 401s
     # with "Missing authorization header" before X-Tenant-Token is
-    # even consulted. Mirrors mcp-rockie/server.js:515.
+    # even consulted. Mirrors mcp-rockie/server.js.
     # NOTE 2026-05-12: ROCKIELAB_API_PASSWORD is NOT staged in tenant
     # Fly secrets today. Until provisioning sets it (task #63), the
     # daemon's authenticated calls still 401. The Bearer wiring here
@@ -148,8 +150,11 @@ def _build_request(
         headers["Authorization"] = f"Bearer {API_PASSWORD}"
     token = token if token is not None else TENANT_TOKEN
     if not token:
+        raise CLIError("ROCKIELAB_TENANT_TOKEN is required", exit_code=2)
+    if not TENANT_ID:
         raise CLIError("ROCKIELAB_TENANT_ID is required", exit_code=2)
     headers["X-Tenant-Token"] = token
+    headers["X-Tenant-Id"] = TENANT_ID
     data: Optional[bytes] = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
