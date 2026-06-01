@@ -22,11 +22,11 @@ const REVIEWED_NON_OWNED_EXEMPTIONS = new Map<string, string>([
     "Detached restart script must outlive the updater process and is service-management, not runtime execution.",
   ],
   [
-    "src/cli/update-cli/update-command.ts:1615:spawn",
+    "src/cli/update-cli/update-command.ts:1661:spawn",
     "Windows taskkill cleanup targets an updater child and carries no runtime secret surface.",
   ],
   [
-    "src/cli/update-cli/update-command.ts:1659:spawn",
+    "src/cli/update-cli/update-command.ts:1705:spawn",
     "Post-core update handoff respawns the CLI with updater-specific env continuity.",
   ],
   [
@@ -302,17 +302,17 @@ describe("owned child process env inventory", () => {
     const callLocations = calls.map(formatCallLocation).toSorted();
     expect(callLocations).toEqual([
       "src/acp/client.ts:143:spawn",
-      "src/agents/mcp-stdio-transport.ts:60:spawn",
+      "src/agents/mcp-stdio-transport.ts:61:spawn",
       "src/agents/pi-bundle-lsp-runtime.ts:69:spawn",
       "src/agents/sandbox/docker.ts:74:spawn",
-      "src/agents/sandbox/ssh.ts:395:spawn",
-      "src/agents/sandbox/ssh.ts:451:spawn",
-      "src/agents/sandbox/ssh.ts:456:spawn",
+      "src/agents/sandbox/ssh.ts:392:spawn",
+      "src/agents/sandbox/ssh.ts:448:spawn",
+      "src/agents/sandbox/ssh.ts:453:spawn",
       "src/auto-reply/reply/stage-sandbox-media.ts:316:spawn",
       "src/cli/proxy-cli.runtime.ts:107:spawn",
       "src/cli/update-cli/restart-helper.ts:398:spawn",
-      "src/cli/update-cli/update-command.ts:1615:spawn",
-      "src/cli/update-cli/update-command.ts:1659:spawn",
+      "src/cli/update-cli/update-command.ts:1661:spawn",
+      "src/cli/update-cli/update-command.ts:1705:spawn",
       "src/commands/doctor-cron.ts:141:execFile",
       "src/commands/doctor-gateway-services.ts:227:execFile",
       "src/commands/doctor-gateway-services.ts:228:execFile",
@@ -342,7 +342,7 @@ describe("owned child process env inventory", () => {
       "src/process/exec.ts:160:execFile",
       "src/process/exec.ts:298:spawn",
       "src/process/exec.ts:348:spawn",
-      "src/process/kill-tree.ts:103:spawn",
+      "src/process/kill-tree.ts:108:spawn",
       "src/proxy-capture/ca.ts:23:execFile",
       "src/secrets/resolve.ts:453:spawn",
       "src/tui/tui-launch.ts:101:spawn",
@@ -351,9 +351,9 @@ describe("owned child process env inventory", () => {
     expect([...REVIEWED_NON_OWNED_EXEMPTIONS.keys()].toSorted()).toEqual(
       callLocations.filter((location) => REVIEWED_NON_OWNED_EXEMPTIONS.has(location)),
     );
-    expect(readSource("src/process/spawn-utils.ts")).toContain(
-      'assertOwnedChildEnv(options.env, "spawnWithFallback")',
-    );
+    const spawnUtilsSource = readSource("src/process/spawn-utils.ts");
+    expect(spawnUtilsSource).toContain("assertOwnedChildEnv(options.env,");
+    expect(spawnUtilsSource).toContain('"spawnWithFallback"');
 
     const failures = calls.flatMap((call) => {
       if (hasReviewedExemption(call)) {
