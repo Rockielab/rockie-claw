@@ -27,6 +27,7 @@ MODE="${MODE:-byok}"
 # ROCKIELAB_API_BASE defaults to the prod control-plane; per-tenant Fly
 # env can override (e.g. https://api.dev.rockielab.com).
 export ROCKIELAB_API_BASE="${ROCKIELAB_API_BASE:-https://api.rockielab.com}"
+export ROCKIELAB_API_URL="${ROCKIELAB_API_URL:-${ROCKIELAB_API_BASE}}"
 export OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-${PLATFORM_TARGET_DIR:-${TARGET_DIR:-/home/runtime}}}"
 export OPENCLAW_SKILLS_DIR="${OPENCLAW_SKILLS_DIR:-${HOME:-/home/runtime}/.claude/skills}"
 # ROCKIELAB_TENANT_ID is tenant identity. ROCKIELAB_TENANT_TOKEN is the
@@ -351,7 +352,8 @@ EOF
     # We point at the same `/home/runtime/mcp-rockie/server.js` binary
     # that the subscription paths register via Dockerfile.multitenant.
     # mcp-rockie is stdio-only and reads ROCKIELAB_API_BASE,
-    # ROCKIELAB_TENANT_DEV_TOKEN, ROCKIELAB_API_PASSWORD from env. We
+    # ROCKIELAB_TENANT_DEV_TOKEN, ROCKIELAB_TENANT_ID, and
+    # ROCKIELAB_API_PASSWORD from env. We
     # set the env map explicitly (rather than relying on process-env
     # inheritance) for parity with the subscription mcp.json payload.
     #
@@ -370,6 +372,7 @@ EOF
       MCP_SERVERS_JSON=$(jq -n \
         --arg bin "$MCP_ROCKIE_BIN" \
         --arg api_base "${ROCKIELAB_API_BASE:-}" \
+        --arg api_url "${ROCKIELAB_API_URL:-}" \
         --arg tenant_token "${ROCKIELAB_TENANT_TOKEN:-}" \
         --arg tenant_id "${ROCKIELAB_TENANT_ID:-}" \
         --arg password "${OPEN_NOTEBOOK_PASSWORD:-}" \
@@ -379,6 +382,7 @@ EOF
             args: [$bin],
             env: {
               ROCKIELAB_API_BASE: $api_base,
+              ROCKIELAB_API_URL: $api_url,
               ROCKIELAB_TENANT_DEV_TOKEN: $tenant_token,
               ROCKIELAB_TENANT_ID: $tenant_id,
               ROCKIELAB_API_PASSWORD: $password

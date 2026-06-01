@@ -10,6 +10,8 @@ def test_entrypoint_does_not_alias_tenant_token_to_tenant_id():
     src = (OVERLAY / "entrypoint.sh").read_text(encoding="utf-8")
 
     assert 'export ROCKIELAB_TENANT_TOKEN="$ROCKIELAB_TENANT_ID"' not in src
+    assert 'export ROCKIELAB_API_URL="${ROCKIELAB_API_URL:-${ROCKIELAB_API_BASE}}"' in src
+    assert "ROCKIELAB_API_URL: $api_url" in src
     assert "ROCKIELAB_TENANT_DEV_TOKEN: $tenant_token" in src
     assert "ROCKIELAB_TENANT_ID: $tenant_id" in src
 
