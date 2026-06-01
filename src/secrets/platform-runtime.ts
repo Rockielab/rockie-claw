@@ -1,6 +1,6 @@
 export const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]*$/u;
-const SECRET_REFERENCE_RE = /\$([A-Z][A-Z0-9_]*)/gu;
-const EXACT_ECHO_HEAD_RE = /^echo\s+\$([A-Z][A-Z0-9_]*)\s*\|\s*head\s+-c\s+([0-9]+)$/u;
+const SECRET_REFERENCE_RE = /\$(?:([A-Z][A-Z0-9_]*)|\{([A-Z][A-Z0-9_]*)\})/gu;
+const EXACT_ECHO_HEAD_RE = /^echo\s+\$[{]?([A-Z][A-Z0-9_]*)[}]?\s*\|\s*head\s+-c\s+([0-9]+)$/u;
 const METADATA_CACHE_TTL_MS = 60_000;
 const ALLOWED_CATEGORIES = new Set(["ssh_key", "api_key", "token", "env_var"]);
 
@@ -51,7 +51,7 @@ export function parseExactEchoHeadCommand(command: string): ExactEchoHeadCommand
 export function extractSecretReferenceCandidates(command: string): string[] {
   const seen = new Set<string>();
   for (const match of command.matchAll(SECRET_REFERENCE_RE)) {
-    const name = match[1];
+    const name = match[1] ?? match[2];
     if (name) {
       seen.add(name);
     }
@@ -232,12 +232,19 @@ export type SecretAwareExecResult =
         name: string;
         requestedCount: number;
       };
+    }
+  | {
+      action: "inject";
+      env: Record<string, string>;
+      redactor: ReturnType<typeof createRuntimeSecretRedactor>;
+      names: string[];
     };
 
 export async function evaluateSecretAwareExecCommand(params: {
   command: string;
   env?: NodeJS.ProcessEnv;
   client?: PlatformSecretsRuntimeClient;
+  allowEnvInjection?: boolean;
 }): Promise<SecretAwareExecResult> {
   const candidates = extractSecretReferenceCandidates(params.command);
   const exact = parseExactEchoHeadCommand(params.command);
@@ -257,10 +264,22 @@ export async function evaluateSecretAwareExecCommand(params: {
     return { action: "pass" };
   }
   if (!exact || secretNames.length !== 1 || secretNames[0] !== exact.name) {
+    if (params.allowEnvInjection !== true) {
+      return {
+        action: "reject",
+        reason: "Stored secret references are only supported in gateway bash subprocess commands.",
+      };
+    }
+    const envelope = validateResolveEnvelope({
+      requested: secretNames,
+      envelope: await client.resolve(secretNames, tenantId, "exec.env"),
+      metadata,
+    });
     return {
-      action: "reject",
-      reason:
-        "Secret references are only allowed in exact broker-native form: echo $NAME | head -c N.",
+      action: "inject",
+      env: envelope.resolved,
+      redactor: createRuntimeSecretRedactor(envelope.resolved),
+      names: secretNames,
     };
   }
   const envelope = validateResolveEnvelope({

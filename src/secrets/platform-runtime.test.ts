@@ -29,6 +29,10 @@ describe("platform runtime secrets", () => {
       name: "DEPLOY_KEY",
       count: 4,
     });
+    expect(parseExactEchoHeadCommand(" echo   ${DEPLOY_KEY} | head -c 4 ")).toEqual({
+      name: "DEPLOY_KEY",
+      count: 4,
+    });
     for (const command of [
       "echo '$DEPLOY_KEY' | head -c 4",
       "FOO=1 echo $DEPLOY_KEY | head -c 4",
@@ -80,7 +84,29 @@ describe("platform runtime secrets", () => {
     });
   });
 
-  it("rejects non-exact use of confirmed secrets", async () => {
+  it("resolves confirmed secrets for gateway env injection", async () => {
+    const result = await evaluateSecretAwareExecCommand({
+      command: `mkdir -p ~/.ssh && printf '%s' "$DEPLOY_KEY" > ~/.ssh/deploy_key`,
+      env: { ROCKIELAB_TENANT_ID: "tenant-a" },
+      client: client({
+        metadata: { known: { DEPLOY_KEY: { category: "ssh_key" } }, unknown: [] },
+        envelope: {
+          resolved: { DEPLOY_KEY: "CANARY_SECRET_VALUE_abcdef" },
+          categories: { DEPLOY_KEY: "ssh_key" },
+          missing: [],
+        },
+      }),
+      allowEnvInjection: true,
+    });
+    expect(result.action).toBe("inject");
+    if (result.action !== "inject") {
+      return;
+    }
+    expect(result.env).toEqual({ DEPLOY_KEY: "CANARY_SECRET_VALUE_abcdef" });
+    expect(result.redactor.redact("CANARY_SECRET_VALUE_abcdef")).toBe("<redacted:DEPLOY_KEY>");
+  });
+
+  it("rejects non-exact use of confirmed secrets when env injection is not allowed", async () => {
     const result = await evaluateSecretAwareExecCommand({
       command: "printf %s $DEPLOY_KEY",
       env: { ROCKIELAB_TENANT_ID: "tenant-a" },
@@ -88,7 +114,7 @@ describe("platform runtime secrets", () => {
         metadata: { known: { DEPLOY_KEY: { category: "ssh_key" } }, unknown: [] },
       }),
     });
-    expect(result.action).toBe("reject");
+    expect(result).toMatchObject({ action: "reject" });
   });
 
   it("fails closed without ROCKIELAB_TENANT_ID and ignores token fallbacks as identity", async () => {

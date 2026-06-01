@@ -84,12 +84,20 @@ export function buildOwnedChildEnv(options: OwnedChildEnvOptions = {}): NodeJS.P
   return out;
 }
 
-export function assertOwnedChildEnv(env: NodeJS.ProcessEnv | undefined, label: string): void {
+export function assertOwnedChildEnv(
+  env: NodeJS.ProcessEnv | undefined,
+  label: string,
+  options: { allowedSecretLikeKeys?: readonly string[] } = {},
+): void {
   if (!env) {
     throw new Error(`${label} requires an explicit owned child env`);
   }
+  const allowedSecretLikeKeys = new Set(options.allowedSecretLikeKeys ?? []);
   for (const key of Object.keys(env)) {
     if (key === "ROCKIELAB_TENANT_TOKEN") {
+      continue;
+    }
+    if (allowedSecretLikeKeys.has(key)) {
       continue;
     }
     if (BLOCKED_NAME_RE.test(key)) {

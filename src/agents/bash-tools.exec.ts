@@ -1406,7 +1406,10 @@ export function createExecTool(
       }
       rejectUnsafeControlShellCommand(params.command);
 
-      const secretCommand = await evaluateSecretAwareExecCommand({ command: params.command });
+      const secretCommand = await evaluateSecretAwareExecCommand({
+        command: params.command,
+        allowEnvInjection: target.selectedTarget === "gateway",
+      });
       if (secretCommand.action === "reject") {
         throw new Error(secretCommand.reason);
       }
@@ -1475,6 +1478,9 @@ export function createExecTool(
               containerWorkdir: containerWorkdir ?? sandbox.containerWorkdir,
             })
           : (hostEnvResult?.env ?? inheritedBaseEnv);
+      if (secretCommand.action === "inject") {
+        Object.assign(env, secretCommand.env);
+      }
 
       if (!sandbox && host === "gateway" && !params.env?.PATH) {
         const shellPath = getShellPathFromLoginShell({
@@ -1596,6 +1602,11 @@ export function createExecTool(
         notifyDeliveryContext,
         timeoutSec: effectiveTimeout,
         onUpdate,
+        redactOutput:
+          secretCommand.action === "inject"
+            ? (text: string) => secretCommand.redactor.redact(text)
+            : undefined,
+        allowedSecretEnvNames: secretCommand.action === "inject" ? secretCommand.names : undefined,
       });
 
       let yielded = false;

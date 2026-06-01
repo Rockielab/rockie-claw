@@ -31,10 +31,13 @@ export async function createChildAdapter(params: {
   windowsVerbatimArguments?: boolean;
   input?: string;
   stdinMode?: "inherit" | "pipe-open" | "pipe-closed";
+  allowedSecretEnvNames?: readonly string[];
 }): Promise<ChildAdapter> {
   const resolvedArgv = [...params.argv];
   resolvedArgv[0] = resolveCommand(resolvedArgv[0] ?? "");
-  assertOwnedChildEnv(params.env, "createChildAdapter");
+  assertOwnedChildEnv(params.env, "createChildAdapter", {
+    allowedSecretLikeKeys: params.allowedSecretEnvNames,
+  });
   const baseEnv = params.env ? toStringEnv(params.env) : undefined;
   const preparedSpawn = prepareOomScoreAdjustedSpawn(resolvedArgv[0] ?? "", resolvedArgv.slice(1), {
     env: baseEnv,
@@ -64,6 +67,7 @@ export async function createChildAdapter(params: {
   const spawned = await spawnWithFallback({
     argv: [preparedSpawn.command, ...preparedSpawn.args],
     options,
+    allowedSecretEnvNames: params.allowedSecretEnvNames,
     fallbacks: useDetached
       ? [
           {

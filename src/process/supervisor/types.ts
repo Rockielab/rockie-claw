@@ -80,6 +80,7 @@ type SpawnBaseInput = {
   captureOutput?: boolean;
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
+  allowedSecretEnvNames?: readonly string[];
 };
 
 type SpawnChildInput = SpawnBaseInput & {

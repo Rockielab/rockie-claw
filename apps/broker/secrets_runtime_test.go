@@ -50,6 +50,10 @@ func TestParseExactEchoHeadCommand(t *testing.T) {
 	if got.Name != "DEPLOY_KEY" || got.Count != 4 {
 		t.Fatalf("unexpected parse result: %+v", got)
 	}
+	got, ok = parseExactEchoHeadCommand(" echo   ${DEPLOY_KEY} | head -c 4 ")
+	if !ok || got.Name != "DEPLOY_KEY" || got.Count != 4 {
+		t.Fatalf("unexpected braced parse result: %+v ok=%v", got, ok)
+	}
 	for _, command := range []string{
 		"echo '$DEPLOY_KEY' | head -c 4",
 		"FOO=1 echo $DEPLOY_KEY | head -c 4",
@@ -102,14 +106,42 @@ func TestSecretAwareSpawnExactFormReturnsOnlyMarker(t *testing.T) {
 	}
 }
 
-func TestSecretAwareSpawnRejectsDisallowedKnownSecretUse(t *testing.T) {
+func TestSecretAwareSpawnLeavesNonExactKnownSecretUseForEnvInjection(t *testing.T) {
 	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
 	withStubSecretsClient(t, stubSecretsClient{
 		metadata: map[string]string{"DEPLOY_KEY": "ssh_key"},
 	})
 	_, handled, err := executeSecretAwareSpawnCommand(context.Background(), "printf %s $DEPLOY_KEY")
-	if !handled || err == nil {
-		t.Fatalf("expected disallowed secret reference rejection, handled=%v err=%v", handled, err)
+	if handled || err != nil {
+		t.Fatalf("expected non-exact secret reference to fall through, handled=%v err=%v", handled, err)
+	}
+}
+
+func TestResolveSecretEnvForSpawnCommandMaterializesKnownRefs(t *testing.T) {
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
+	secretValue := "CANARY_SECRET_VALUE_abcdef"
+	withStubSecretsClient(t, stubSecretsClient{
+		metadata: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		resolved: resolvedSecretSet{
+			Values:     map[string]string{"DEPLOY_KEY": secretValue},
+			Categories: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		},
+	})
+	resolved, handled, err := resolveSecretEnvForSpawnCommand(
+		context.Background(),
+		`mkdir -p ~/.ssh && printf '%s' "$DEPLOY_KEY" > ~/.ssh/deploy_key`,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected known secret ref to be resolved for bash env injection")
+	}
+	if resolved.Values["DEPLOY_KEY"] != secretValue {
+		t.Fatalf("unexpected resolved value map: %v", resolved.Values)
+	}
+	if got := resolved.Redactor.Redact("prefix " + secretValue); strings.Contains(got, secretValue) {
+		t.Fatalf("redactor leaked secret value: %q", got)
 	}
 }
 

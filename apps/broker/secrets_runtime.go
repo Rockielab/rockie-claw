@@ -22,8 +22,8 @@ const secretMetadataCacheTTL = 60 * time.Second
 
 var (
 	secretNameRE        = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
-	secretReferenceRE   = regexp.MustCompile(`\$([A-Z][A-Z0-9_]*)`)
-	exactEchoHeadFormRE = regexp.MustCompile(`^echo\s+\$([A-Z][A-Z0-9_]*)\s*\|\s*head\s+-c\s+([0-9]+)$`)
+	secretReferenceRE   = regexp.MustCompile(`\$(?:([A-Z][A-Z0-9_]*)|\{([A-Z][A-Z0-9_]*)\})`)
+	exactEchoHeadFormRE = regexp.MustCompile(`^echo\s+\$[{]?([A-Z][A-Z0-9_]*)[}]?\s*\|\s*head\s+-c\s+([0-9]+)$`)
 	allowedCategories   = map[string]struct{}{
 		"ssh_key": {},
 		"api_key": {},
@@ -46,6 +46,11 @@ type resolvedSecretSet struct {
 	Values     map[string]string
 	Categories map[string]string
 	Missing    []string
+}
+
+type resolvedCommandSecrets struct {
+	Values   map[string]string
+	Redactor *secretRedactor
 }
 
 type httpPlatformSecretsClient struct {
@@ -92,6 +97,9 @@ func extractSecretReferenceCandidates(command string) []string {
 	out := make([]string, 0, len(matches))
 	for _, match := range matches {
 		name := match[1]
+		if name == "" {
+			name = match[2]
+		}
 		if _, ok := seen[name]; ok {
 			continue
 		}
@@ -128,7 +136,7 @@ func executeSecretAwareSpawnCommand(ctx context.Context, command string) (spawnR
 		return spawnResponse{}, false, nil
 	}
 	if !exactOK || len(secretRefs) != 1 || secretRefs[0] != exact.Name {
-		return spawnResponse{}, true, errors.New("secret references are only allowed in exact broker-native form: echo $NAME | head -c N")
+		return spawnResponse{}, false, nil
 	}
 	resolved, err := brokerSecretsClient.Resolve(ctx, tenantID(), []string{exact.Name}, "exec.exact.echo_head")
 	if err != nil {
@@ -147,6 +155,40 @@ func executeSecretAwareSpawnCommand(ctx context.Context, command string) (spawnR
 	}, true, nil
 }
 
+func resolveSecretEnvForSpawnCommand(ctx context.Context, command string) (resolvedCommandSecrets, bool, error) {
+	candidates := extractSecretReferenceCandidates(command)
+	if len(candidates) == 0 {
+		return resolvedCommandSecrets{}, false, nil
+	}
+	known, err := cachedCandidateMetadata(ctx, tenantID(), candidates)
+	if err != nil {
+		return resolvedCommandSecrets{}, false, err
+	}
+	if len(known) == 0 {
+		return resolvedCommandSecrets{}, false, nil
+	}
+	secretRefs := make([]string, 0, len(known))
+	for _, name := range candidates {
+		if _, ok := known[name]; ok {
+			secretRefs = append(secretRefs, name)
+		}
+	}
+	resolved, err := brokerSecretsClient.Resolve(ctx, tenantID(), secretRefs, "exec.env")
+	if err != nil {
+		return resolvedCommandSecrets{}, true, err
+	}
+	if err := validateResolvedExactSet(secretRefs, resolved, known); err != nil {
+		return resolvedCommandSecrets{}, true, err
+	}
+	if err := assertNoSecretInArgv([]string{"bash", "-c", command}, resolved.Values); err != nil {
+		return resolvedCommandSecrets{}, true, err
+	}
+	return resolvedCommandSecrets{
+		Values:   resolved.Values,
+		Redactor: newSecretRedactor(resolved.Values),
+	}, true, nil
+}
+
 func rejectDisallowedSecretReferences(ctx context.Context, command string) error {
 	candidates := extractSecretReferenceCandidates(command)
 	if len(candidates) == 0 {
@@ -159,7 +201,7 @@ func rejectDisallowedSecretReferences(ctx context.Context, command string) error
 	if len(known) == 0 {
 		return nil
 	}
-	return errors.New("secret references are only allowed in exact broker-native form: echo $NAME | head -c N")
+	return errors.New("stored secret references are only supported in broker bash -c commands")
 }
 
 func validateResolvedExactSet(requested []string, resolved resolvedSecretSet, metadata map[string]string) error {

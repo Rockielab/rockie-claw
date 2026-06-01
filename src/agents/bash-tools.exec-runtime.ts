@@ -572,6 +572,8 @@ export async function runExecProcess(opts: {
   notifyDeliveryContext?: DeliveryContext;
   timeoutSec: number | null;
   onUpdate?: (partialResult: AgentToolResult<ExecToolDetails>) => void;
+  redactOutput?: (text: string) => string;
+  allowedSecretEnvNames?: readonly string[];
 }): Promise<ExecProcessHandle> {
   const startedAt = Date.now();
   const sessionId = createSessionSlug();
@@ -663,7 +665,8 @@ export async function runExecProcess(opts: {
     if (mode) {
       session.cursorKeyMode = mode;
     }
-    const str = sanitizeBinaryOutput(raw);
+    const sanitized = sanitizeBinaryOutput(raw);
+    const str = opts.redactOutput?.(sanitized) ?? sanitized;
     for (const chunk of chunkString(str)) {
       appendOutput(session, "stdout", chunk);
       emitUpdate();
@@ -671,7 +674,8 @@ export async function runExecProcess(opts: {
   };
 
   const handleStderr = (data: string) => {
-    const str = sanitizeBinaryOutput(data);
+    const sanitized = sanitizeBinaryOutput(data);
+    const str = opts.redactOutput?.(sanitized) ?? sanitized;
     for (const chunk of chunkString(str)) {
       appendOutput(session, "stderr", chunk);
       emitUpdate();
@@ -773,6 +777,7 @@ export async function runExecProcess(opts: {
       captureOutput: false,
       onStdout: onSupervisorStdout,
       onStderr: handleStderr,
+      allowedSecretEnvNames: opts.allowedSecretEnvNames,
     };
     managedRun =
       spawnSpec.mode === "pty"
@@ -810,6 +815,7 @@ export async function runExecProcess(opts: {
           captureOutput: false,
           onStdout: handleStdout,
           onStderr: handleStderr,
+          allowedSecretEnvNames: opts.allowedSecretEnvNames,
         });
       } catch (retryErr) {
         markExited(session, null, null, "failed");

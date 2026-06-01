@@ -20,6 +20,7 @@ type SpawnWithFallbackParams = {
   spawnImpl?: typeof spawn;
   retryCodes?: string[];
   onFallback?: (err: unknown, fallback: SpawnFallback) => void;
+  allowedSecretEnvNames?: readonly string[];
 };
 
 const DEFAULT_RETRY_CODES = ["EBADF"];
@@ -42,8 +43,11 @@ async function spawnAndWaitForSpawn(
   spawnImpl: typeof spawn,
   argv: string[],
   options: SpawnOptions,
+  allowedSecretEnvNames?: readonly string[],
 ): Promise<ChildProcess> {
-  assertOwnedChildEnv(options.env, "spawnWithFallback");
+  assertOwnedChildEnv(options.env, "spawnWithFallback", {
+    allowedSecretLikeKeys: allowedSecretEnvNames,
+  });
   const child = spawnImpl(argv[0], argv.slice(1), options);
 
   return await new Promise((resolve, reject) => {
@@ -101,7 +105,12 @@ export async function spawnWithFallback(
   for (let index = 0; index < attempts.length; index += 1) {
     const attempt = attempts[index];
     try {
-      const child = await spawnAndWaitForSpawn(spawnImpl, params.argv, attempt.options);
+      const child = await spawnAndWaitForSpawn(
+        spawnImpl,
+        params.argv,
+        attempt.options,
+        params.allowedSecretEnvNames,
+      );
       return {
         child,
         usedFallback: index > 0,
