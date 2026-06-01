@@ -81,6 +81,17 @@ def test_gpu_smoke_queue_row_uses_broker_provision_and_teardown(loop, monkeypatc
     assert calls[3][0:2] == ("POST", "/api/agent-tools/emit_artifact")
 
 
+def test_build_request_sends_auth_token_and_tenant_id(loop, monkeypatch):
+    monkeypatch.setattr(loop, "TENANT_TOKEN", "service-token")
+    monkeypatch.setattr(loop, "TENANT_ID", "t-loop")
+
+    req = loop._build_request("GET", "/api/labs/lab-1/loop-state")
+    headers = dict(req.header_items())
+
+    assert headers["X-tenant-token"] == "service-token"
+    assert headers["X-tenant-id"] == "t-loop"
+
+
 def test_gpu_smoke_queue_row_rejects_unbounded_or_credential_fields(loop, monkeypatch):
     calls: list[tuple[str, str, dict | None]] = []
 

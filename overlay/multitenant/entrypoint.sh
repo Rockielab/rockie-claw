@@ -29,14 +29,17 @@ MODE="${MODE:-byok}"
 export ROCKIELAB_API_BASE="${ROCKIELAB_API_BASE:-https://api.rockielab.com}"
 export OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-${PLATFORM_TARGET_DIR:-${TARGET_DIR:-/home/runtime}}}"
 export OPENCLAW_SKILLS_DIR="${OPENCLAW_SKILLS_DIR:-${HOME:-/home/runtime}/.claude/skills}"
-# ROCKIELAB_TENANT_ID is the sole tenant identity source. The context
-# API reads X-Tenant-Token literally as the tenant id, so broker tokens
-# and legacy ROCKIELAB_TENANT_TOKEN secrets must never supply identity.
+# ROCKIELAB_TENANT_ID is tenant identity. ROCKIELAB_TENANT_TOKEN is the
+# service/dev auth token sent as X-Tenant-Token. Runtime clients send
+# both X-Tenant-Token and X-Tenant-Id so auth and tenant scoping stay
+# separate.
 if [ -z "${ROCKIELAB_TENANT_ID:-}" ]; then
   printf '[entrypoint] ERROR: ROCKIELAB_TENANT_ID is required\n' >&2
   exit 1
 fi
-export ROCKIELAB_TENANT_TOKEN="$ROCKIELAB_TENANT_ID"
+if [ -z "${ROCKIELAB_TENANT_TOKEN:-}" ]; then
+  printf '[entrypoint] WARN: ROCKIELAB_TENANT_TOKEN unset; token-gated platform APIs may 401\n' >&2
+fi
 # OpenClaw gateway needs to listen on the Fly machine's external
 # interface so platform-context can HTTP-proxy to it through the
 # WireGuard tunnel. Fly's 6PN private network is IPv6-ONLY (addresses
@@ -368,6 +371,7 @@ EOF
         --arg bin "$MCP_ROCKIE_BIN" \
         --arg api_base "${ROCKIELAB_API_BASE:-}" \
         --arg tenant_token "${ROCKIELAB_TENANT_TOKEN:-}" \
+        --arg tenant_id "${ROCKIELAB_TENANT_ID:-}" \
         --arg password "${OPEN_NOTEBOOK_PASSWORD:-}" \
         '{
           rockie: {
@@ -376,6 +380,7 @@ EOF
             env: {
               ROCKIELAB_API_BASE: $api_base,
               ROCKIELAB_TENANT_DEV_TOKEN: $tenant_token,
+              ROCKIELAB_TENANT_ID: $tenant_id,
               ROCKIELAB_API_PASSWORD: $password
             }
           }

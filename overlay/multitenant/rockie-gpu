@@ -12,11 +12,11 @@ Hits the platform-context HTTP surface under ``/api/gpu``. Subcommands:
 Output: JSON-lines by default (one JSON object per line on stdout).
 Pass ``--human`` for k:v dicts and ascii-table lists.
 
-Tenant identity:
+Tenant auth and identity:
 
-  ``ROCKIELAB_TENANT_ID`` env var only. Broker tokens, legacy
-  ``ROCKIELAB_TENANT_TOKEN`` values, and local config are not accepted
-  as tenant identity.
+  ``ROCKIELAB_TENANT_TOKEN`` is sent as ``X-Tenant-Token`` for service
+  auth. ``ROCKIELAB_TENANT_ID`` is sent separately as ``X-Tenant-Id`` for
+  tenant scoping.
 
 Same ladder for the API base URL:
 
@@ -87,11 +87,21 @@ def _load_local_config(path: str = CONFIG_PATH_DEFAULT) -> dict:
 
 
 def _get_token() -> str:
-    """Resolve tenant identity. Raises ``CLIError`` with exit code 2
-    when ``ROCKIELAB_TENANT_ID`` is not set."""
-    tok = os.environ.get("ROCKIELAB_TENANT_ID")
+    """Resolve tenant auth token. Raises ``CLIError`` with exit code 2
+    when ``ROCKIELAB_TENANT_TOKEN`` is not set."""
+    tok = os.environ.get("ROCKIELAB_TENANT_TOKEN")
     if tok and tok.strip():
         return tok.strip()
+    raise CLIError(
+        "ROCKIELAB_TENANT_TOKEN is required",
+        exit_code=2,
+    )
+
+
+def _get_tenant_id() -> str:
+    tid = os.environ.get("ROCKIELAB_TENANT_ID")
+    if tid and tid.strip():
+        return tid.strip()
     raise CLIError(
         "ROCKIELAB_TENANT_ID is required",
         exit_code=2,
@@ -104,6 +114,19 @@ def _get_api_base() -> str:
         return base
     cfg = _load_local_config()
     return cfg.get("api_base") or API_BASE_DEFAULT
+
+
+def _build_headers() -> dict[str, str]:
+    return {
+        "Accept": "application/json",
+        # Cloudflare's "browser_signature_banned" rule (error 1010) blocks
+        # the default urllib UA. Same mitigation as the rockie-loop daemon
+        # (`486da0f348`); use an explicit, identifying UA so Cloudflare
+        # routes us through the WAF rules instead of the bot wall.
+        "User-Agent": "rockie-gpu/1.0 (+https://api.rockielab.com)",
+        "X-Tenant-Token": _get_token(),
+        "X-Tenant-Id": _get_tenant_id(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -120,15 +143,7 @@ def _http(method: str, path: str, body: Optional[dict] = None) -> Any:
     """
     url = _get_api_base().rstrip("/") + path
     data: Optional[bytes] = None
-    headers: dict[str, str] = {
-        "Accept": "application/json",
-        # Cloudflare's "browser_signature_banned" rule (error 1010) blocks
-        # the default urllib UA. Same mitigation as the rockie-loop daemon
-        # (`486da0f348`); use an explicit, identifying UA so Cloudflare
-        # routes us through the WAF rules instead of the bot wall.
-        "User-Agent": "rockie-gpu/1.0 (+https://api.rockielab.com)",
-        "X-Tenant-Token": _get_token(),
-    }
+    headers: dict[str, str] = _build_headers()
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"

@@ -65,15 +65,16 @@ def _write_config(home: Path, payload) -> Path:
 
 def test_tenant_id_env_var_is_used(cli, monkeypatch):
     monkeypatch.setenv("ROCKIELAB_TENANT_ID", "t-aaa")
-    monkeypatch.setenv("ROCKIELAB_TENANT_TOKEN", "legacy-token")
+    monkeypatch.setenv("ROCKIELAB_TENANT_TOKEN", "service-token")
     monkeypatch.setenv("BROKER_TENANT_TOKEN", "broker-token")
-    assert cli._get_token() == "t-aaa"
+    assert cli._get_token() == "service-token"
+    assert cli._get_tenant_id() == "t-aaa"
 
 
 def test_config_file_tenant_token_is_not_identity(cli, tmp_path):
     _write_config(tmp_path, {"tenant_token": "t-ccc"})
     with pytest.raises(cli.CLIError) as excinfo:
-        cli._get_token()
+        cli._get_tenant_id()
     assert excinfo.value.exit_code == 2
     assert "rockielab_tenant_id" in str(excinfo.value).lower()
 
@@ -86,7 +87,15 @@ def test_get_token_raises_when_nothing_set(cli):
     # do anything useful without a tenant id, so we surface it as a
     # configuration/usage problem rather than a network error (1).
     assert excinfo.value.exit_code == 2
-    assert "rockielab_tenant_id" in str(excinfo.value).lower()
+    assert "rockielab_tenant_token" in str(excinfo.value).lower()
+
+
+def test_build_request_sends_auth_token_and_tenant_id(cli, monkeypatch):
+    monkeypatch.setenv("ROCKIELAB_TENANT_TOKEN", "service-token")
+    monkeypatch.setenv("ROCKIELAB_TENANT_ID", "t-aaa")
+    headers = cli._build_headers()
+    assert headers["X-Tenant-Token"] == "service-token"
+    assert headers["X-Tenant-Id"] == "t-aaa"
 
 
 # ---------------------------------------------------------------------------
@@ -139,4 +148,3 @@ def test_list_alias_dispatches_to_list_prices_handler(cli):
     # argparse aliases display the canonical name in --help, so a
     # textual comparison would be misleading.
     assert alias.func is canonical.func
-
