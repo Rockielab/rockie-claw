@@ -285,6 +285,7 @@ jobs:
       IMAGE_TAG: ghcr.io/saml212/rockielab-runtime-multitenant:${{ github.sha }}
       ROLLOUT_ARTIFACT_DIR: .artifacts/runtime-rollout
       ROLLOUT_MAX_ATTEMPTS: "5"
+      ROLLOUT_CURL_MAX_TIME: "180"
     steps:
       - name: Preflight — required secrets present
         id: preflight
@@ -366,6 +367,7 @@ jobs:
             set +e
             code=$(curl -sS -o "$response_file" -w "%{http_code}" \
               --connect-timeout 10 \
+              --max-time "$ROLLOUT_CURL_MAX_TIME" \
               -X POST \
               -H "X-Admin-Token: $ADMIN_TOKEN" \
               -H "Authorization: Bearer $API_PASSWORD" \
