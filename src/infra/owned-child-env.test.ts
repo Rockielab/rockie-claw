@@ -6,14 +6,13 @@ import {
 } from "./owned-child-env.js";
 
 describe("owned child env", () => {
-  it("builds an explicit positive env and derives tenant token only from tenant id", () => {
+  it("builds an explicit positive env without deriving tenant token from tenant id", () => {
     const env = buildOwnedChildEnv({
       baseEnv: {
         PATH: "/usr/bin",
         HOME: "/home/runtime",
         OPENAI_API_KEY: "sk-secret",
         BROKER_TENANT_TOKEN: "broker-secret",
-        ROCKIELAB_TENANT_TOKEN: "legacy-token",
         ROCKIELAB_TENANT_ID: "tenant-123",
         LANG: "en_US.UTF-8",
       },
@@ -24,7 +23,33 @@ describe("owned child env", () => {
     expect(env.OPENAI_API_KEY).toBeUndefined();
     expect(env.BROKER_TENANT_TOKEN).toBeUndefined();
     expect(env.ROCKIELAB_TENANT_ID).toBe("tenant-123");
-    expect(env.ROCKIELAB_TENANT_TOKEN).toBe("tenant-123");
+    expect(env.ROCKIELAB_TENANT_TOKEN).toBeUndefined();
+  });
+
+  it("preserves explicit tenant token separately from tenant id", () => {
+    const env = buildOwnedChildEnv({
+      baseEnv: {
+        PATH: "/usr/bin",
+        ROCKIELAB_TENANT_ID: "tenant-123",
+        ROCKIELAB_TENANT_TOKEN: "service-token",
+      },
+    });
+    expect(env.ROCKIELAB_TENANT_ID).toBe("tenant-123");
+    expect(env.ROCKIELAB_TENANT_TOKEN).toBe("service-token");
+  });
+
+  it("keeps the tenant token carve-out exact-name only", () => {
+    const env = buildOwnedChildEnv({
+      baseEnv: {
+        PATH: "/usr/bin",
+        ROCKIELAB_TENANT_TOKEN: "service-token",
+        ROCKIELAB_OTHER_TENANT_TOKEN: "other-secret",
+        SERVICE_TOKEN: "service-secret",
+      },
+    });
+    expect(env.ROCKIELAB_TENANT_TOKEN).toBe("service-token");
+    expect(env.ROCKIELAB_OTHER_TENANT_TOKEN).toBeUndefined();
+    expect(env.SERVICE_TOKEN).toBeUndefined();
   });
 
   it("rejects secret-like keys in explicit owned envs", () => {
