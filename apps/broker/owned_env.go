@@ -16,6 +16,9 @@ var blockedOwnedChildEnvName = regexp.MustCompile(`(?i)(TOKEN|PASSWORD|PASSWD|SE
 // scrubbed, allowlisted env (see ownedChildEnv) — NOT an inherited one.
 // That is the correct posture: the broker must not hand the agent its
 // own auth token (BROKER_TENANT_TOKEN) or the platform API password.
+// Tenant-scoped runtime clients still need ROCKIELAB_TENANT_TOKEN
+// because rockie-gpu / mcp-rockie use it as X-Tenant-Token while
+// ROCKIELAB_TENANT_ID remains the tenant scope header.
 // But it also means a user who connects GitHub / HuggingFace at
 // /settings/connections — which lands GH_TOKEN / HF_TOKEN in the
 // container env as Fly app secrets — never sees those tokens reach
@@ -65,7 +68,10 @@ func ownedChildEnv() []string {
 		"XDG_CACHE_HOME",
 		"XDG_DATA_HOME",
 		"ROCKIELAB_API_BASE",
+		"ROCKIELAB_API_URL",
 		"ROCKIELAB_TENANT_ID",
+		"ROCKIELAB_TENANT_TOKEN",
+		"BINARY",
 		"BROKER_PORT",
 	}
 	// User-connected credentials (GH_TOKEN / HF_TOKEN) are copied from
@@ -81,9 +87,6 @@ func ownedChildEnv() []string {
 	}
 	if tid := tenantID(); tid != "" {
 		env["ROCKIELAB_TENANT_ID"] = tid
-		// Current in-machine CLIs use this header value for API compatibility.
-		// Derive it only from ROCKIELAB_TENANT_ID; never copy a token fallback.
-		env["ROCKIELAB_TENANT_TOKEN"] = tid
 	}
 	out := make([]string, 0, len(env))
 	for key, value := range env {
@@ -102,8 +105,9 @@ func ownedChildEnv() []string {
 // to a spawned agent process. A name is allowed unless the block regex
 // matches it — EXCEPT for two explicit, exact-name carve-outs:
 //
-//   - ROCKIELAB_TENANT_TOKEN: derived from ROCKIELAB_TENANT_ID, not a
-//     real secret (see ownedChildEnv); the CLIs need it as a header.
+//   - ROCKIELAB_TENANT_TOKEN: a tenant-scoped service token explicitly
+//     staged for tenant runtime API calls. It is not the broker token or
+//     platform API password.
 //   - any name in forwardedConnectionEnv: user-connected credentials
 //     the agent is explicitly meant to use.
 //

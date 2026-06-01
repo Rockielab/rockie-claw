@@ -168,12 +168,14 @@ func TestValidateResolvedExactSetRejectsBadEnvelope(t *testing.T) {
 	}
 }
 
-func TestOwnedChildEnvDropsSecretsAndDerivesTenantTokenFromTenantID(t *testing.T) {
+func TestOwnedChildEnvDropsSecretsAndForwardsTenantRuntimeContext(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin")
 	t.Setenv("HOME", "/home/runtime")
 	t.Setenv("BROKER_TENANT_TOKEN", "broker-secret")
 	t.Setenv("OPENAI_API_KEY", "sk-secret")
-	t.Setenv("ROCKIELAB_TENANT_TOKEN", "legacy-token")
+	t.Setenv("ROCKIELAB_API_URL", "https://api.rockielab.test")
+	t.Setenv("BINARY", "codex")
+	t.Setenv("ROCKIELAB_TENANT_TOKEN", "service-token")
 	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-123")
 	env := ownedChildEnv()
 	if envContainsName(env, "BROKER_TENANT_TOKEN") || envContainsName(env, "OPENAI_API_KEY") {
@@ -182,14 +184,35 @@ func TestOwnedChildEnvDropsSecretsAndDerivesTenantTokenFromTenantID(t *testing.T
 	if !envContainsName(env, "ROCKIELAB_TENANT_ID") {
 		t.Fatalf("owned child env missing tenant id: %v", env)
 	}
-	foundDerived := false
-	for _, kv := range env {
-		if kv == "ROCKIELAB_TENANT_TOKEN=tenant-123" {
-			foundDerived = true
+	for _, want := range []string{
+		"ROCKIELAB_TENANT_TOKEN=service-token",
+		"ROCKIELAB_API_URL=https://api.rockielab.test",
+		"BINARY=codex",
+	} {
+		found := false
+		for _, kv := range env {
+			if kv == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("owned child env missing %q: %v", want, env)
 		}
 	}
-	if !foundDerived {
-		t.Fatalf("owned child env should derive tenant token only from tenant id: %v", env)
+	for _, kv := range env {
+		if kv == "ROCKIELAB_TENANT_TOKEN=tenant-123" {
+			t.Fatalf("owned child env must not alias tenant token to tenant id: %v", env)
+		}
+	}
+}
+
+func TestOwnedChildEnvDoesNotInventTenantToken(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	t.Setenv("HOME", "/home/runtime")
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-123")
+	env := ownedChildEnv()
+	if envContainsName(env, "ROCKIELAB_TENANT_TOKEN") {
+		t.Fatalf("owned child env must not invent tenant token from tenant id: %v", env)
 	}
 }
 
@@ -252,7 +275,16 @@ func TestOwnedChildEnvStillBlocksPlatformSecretsAlongsideConnectionCreds(t *test
 // a future regex tweak or allowlist edit can't silently change which
 // names reach the agent.
 func TestIsEnvNameAllowedForChild(t *testing.T) {
-	allowed := []string{"PATH", "HOME", "ROCKIELAB_TENANT_ID", "ROCKIELAB_TENANT_TOKEN", "GH_TOKEN", "HF_TOKEN"}
+	allowed := []string{
+		"PATH",
+		"HOME",
+		"ROCKIELAB_TENANT_ID",
+		"ROCKIELAB_TENANT_TOKEN",
+		"ROCKIELAB_API_URL",
+		"BINARY",
+		"GH_TOKEN",
+		"HF_TOKEN",
+	}
 	for _, name := range allowed {
 		if !isEnvNameAllowedForChild(name) {
 			t.Fatalf("%q must be allowed for the child env", name)

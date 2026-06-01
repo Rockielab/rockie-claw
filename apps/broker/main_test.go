@@ -514,7 +514,7 @@ func TestPTYFramingRoundtrip(t *testing.T) {
 	}
 }
 
-func TestWSBinaryQueryDispatchIgnoresEnvAndDefaultsToClaude(t *testing.T) {
+func TestWSBinaryQueryDispatchUsesQueryButForwardsRuntimeBinaryEnv(t *testing.T) {
 	setBrokerTestEnv(t, "tt")
 	t.Setenv("MODE", "subscription")
 	t.Setenv("BINARY", "codex")
@@ -554,8 +554,8 @@ func TestWSBinaryQueryDispatchIgnoresEnvAndDefaultsToClaude(t *testing.T) {
 			if !strings.Contains(gotStdout, "BINARY=") {
 				t.Fatalf("expected BINARY probe output, got %q", gotStdout)
 			}
-			if strings.Contains(gotStdout, "\nBINARY=codex") || strings.HasPrefix(gotStdout, "BINARY=codex") {
-				t.Fatalf("expected broker child env to ignore BINARY, got %q", gotStdout)
+			if !strings.Contains(gotStdout, "\nBINARY=codex") && !strings.HasPrefix(gotStdout, "BINARY=codex") {
+				t.Fatalf("expected broker child env to forward runtime BINARY, got %q", gotStdout)
 			}
 			if gotExit != 0 {
 				t.Fatalf("expected exit 0, got %d stdout=%q", gotExit, gotStdout)
