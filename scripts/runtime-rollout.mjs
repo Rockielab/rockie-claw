@@ -25,7 +25,7 @@ export function tenantIdsFromFlyApps(body, prefix = TENANT_APP_PREFIX) {
       tenantIds.add(tenantId);
     }
   }
-  return [...tenantIds].toSorted();
+  return [...tenantIds].toSorted((left, right) => left.localeCompare(right));
 }
 
 export function tenantImageRequestBody(image) {
