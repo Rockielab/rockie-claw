@@ -1,23 +1,62 @@
 #!/usr/bin/env python3
-"""rockie-gpu — thin CLI over the Rockie platform GPU broker.
+# Source of truth for the rockie-gpu CLI. Vendored into platform-context at
+# api/installers/rockie_gpu.py (served via /install/rockie-gpu) — re-vendor on every change.
+"""rockie-gpu — agent-facing CLI for the Rockie GPU broker.
 
-Hits the platform-context HTTP surface under ``/api/gpu``. Subcommands:
+Lives in the per-tenant runtime image at ``/opt/rockie-gpu/rockie-gpu``
+with a symlink at ``/usr/local/bin/rockie-gpu``. The in-runtime agent
+(Claude / Codex / OpenClaw) shells out to it the way it shells out to
+``gh`` or ``flyctl``.
 
-    list-prices   GET    /api/gpu/prices?gpu=&spot=&provider=
-    provision     POST   /api/gpu/provision     (JSON body)
-    status        GET    /api/gpu/pods/<id>/status?provider=
-    spent         GET    /api/gpu/spent
-    teardown      DELETE /api/gpu/pods/<id>?provider=
+Default output is JSON-lines (one JSON object per line), so the agent
+can parse it deterministically. ``--human`` flips to a friendlier
+table view for ad-hoc debugging.
 
-Output: JSON-lines by default (one JSON object per line on stdout).
-Pass ``--human`` for k:v dicts and ascii-table lists.
+This CLI is the tenant-facing PRODUCT surface for the Rockie GPU market.
+It is deidentified by construction: it NEVER shows a provider name to a
+tenant. The agent/customer shops the market with ``market`` and acquires
+capacity with ``provision`` against an opaque ``candidate_id`` /
+``quote_token`` — the broker resolves the provider server-side and never
+returns it. Provider targeting + raw reveals are admin-only, gated behind
+``--admin-debug`` (which sends ``X-Admin-Token`` from
+``ROCKIELAB_ADMIN_TOKEN``).
 
-Tenant auth and identity:
+Subcommands:
 
-  ``ROCKIELAB_TENANT_TOKEN`` (or compatibility alias
-  ``ROCKIELAB_TENANT_DEV_TOKEN``) is sent as ``X-Tenant-Token`` for
-  service auth. ``ROCKIELAB_TENANT_ID`` is sent separately as
-  ``X-Tenant-Id`` for tenant scoping.
+  market           [--vram-min GB] [--gpu GPU] [--gpu-count N]
+                   [--tier {spot,on_demand,any} | --spot | --on-demand]
+                   [--region {us,eu,any}] [--duration H] [--human]
+                   [--admin-debug]
+  provision        [--best | --candidate-id ID | --quote-token TOK]
+                   [--budget-cents C] [--max-runtime SEC] [--re-quote-pct P]
+                   --gpu GPU --hours H [--gpu-count N]
+                   [--spot | --on-demand] [--dry-run] [--human]
+                   [--admin-debug [--provider P]]
+  audit-open-spend [--demo-safe] [--tenant T] [--human] [--admin-debug]
+  list-prices      [--gpu GPU] [--spot] [--provider P] [--human]
+                     (DEPRECATED — use ``market``)
+  status           POD_ID [--provider P]
+  spent
+  teardown         POD_ID [--provider P]
+
+Resolution order for the tenant auth token (first hit wins):
+
+  1. ``ROCKIELAB_TENANT_TOKEN`` env var (canonical; set by the per-tenant
+     runtime image's ``overlay/multitenant/entrypoint.sh``)
+  2. ``BROKER_TENANT_TOKEN`` env var (legacy alias; still honored)
+  3. ``~/.rockie/config.json`` key ``tenant_token`` (local-shell install)
+  4. error (exit code 2 — same class as "bad argv / usage error")
+
+Tenant identity is sent separately as ``X-Tenant-Id``. Resolution order:
+
+  1. ``ROCKIELAB_TENANT_ID`` env var
+  2. ``~/.rockie/config.json`` key ``tenant_id``
+  3. ``tenant_token`` legacy fallback (older installs used the token as
+     identity before ``X-Tenant-Id`` existed)
+  4. error (exit code 2)
+
+The optional admin token (``--admin-debug`` only) resolves from
+``ROCKIELAB_ADMIN_TOKEN`` and is sent as ``X-Admin-Token``.
 
 Same ladder for the API base URL:
 
@@ -25,11 +64,11 @@ Same ladder for the API base URL:
   ``API_BASE_DEFAULT`` (``https://api.rockielab.com``).
 
 Exit codes:
-    0  success
-    1  network error / connection refused
-    2  argparse / usage error / missing tenant id
-    3  HTTP 4xx (provider error, insufficient credits, etc.)
-    4  HTTP 5xx (provider outage, retryable)
+  0   success
+  1   network / API error
+  2   bad argv / usage error / missing tenant token
+  3   server returned HTTP 4xx (auth, validation, insufficient credit)
+  4   server returned HTTP 5xx (provider outage)
 """
 
 from __future__ import annotations
@@ -44,19 +83,16 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
-
 API_BASE_DEFAULT = "https://api.rockielab.com"
 CONFIG_PATH_DEFAULT = "~/.rockie/config.json"
 
 
 # ---------------------------------------------------------------------------
-# Error
+# Config / credential resolution
 # ---------------------------------------------------------------------------
 
 
 class CLIError(Exception):
-    """Structured CLI error with a process exit code."""
-
     def __init__(
         self,
         message: str,
@@ -66,23 +102,9 @@ class CLIError(Exception):
         payload: Any = None,
     ):
         super().__init__(message)
-        self.message = message
         self.exit_code = exit_code
         self.http_status = http_status
         self.payload = payload
-
-
-class CommandOutcome:
-    """Command payload plus process exit code."""
-
-    def __init__(self, payload: Any, exit_code: int = 0):
-        self.payload = payload
-        self.exit_code = exit_code
-
-
-# ---------------------------------------------------------------------------
-# Config / credential resolution
-# ---------------------------------------------------------------------------
 
 
 def _load_local_config(path: str = CONFIG_PATH_DEFAULT) -> dict:
@@ -105,15 +127,22 @@ def _load_local_config(path: str = CONFIG_PATH_DEFAULT) -> dict:
 
 
 def _get_token() -> str:
-    """Resolve tenant auth token. Raises ``CLIError`` with exit code 2
-    when neither tenant auth env var is set."""
+    """Resolve the tenant auth token. Raises ``CLIError`` with exit code 2
+    when no source is set (same class as argparse usage errors —
+    "you need to configure auth before this CLI can do anything")."""
     tok = os.environ.get("ROCKIELAB_TENANT_TOKEN") or os.environ.get(
-        "ROCKIELAB_TENANT_DEV_TOKEN"
+        "BROKER_TENANT_TOKEN"
     )
-    if tok and tok.strip():
-        return tok.strip()
+    if tok:
+        return tok
+    cfg = _load_local_config()
+    tok = cfg.get("tenant_token")
+    if tok:
+        return tok
     raise CLIError(
-        "ROCKIELAB_TENANT_TOKEN or ROCKIELAB_TENANT_DEV_TOKEN is required",
+        "no tenant token configured — set ROCKIELAB_TENANT_TOKEN, "
+        "BROKER_TENANT_TOKEN, or write ~/.rockie/config.json with "
+        "{\"tenant_token\": \"t-...\"}",
         exit_code=2,
     )
 
@@ -122,8 +151,30 @@ def _get_tenant_id() -> str:
     tid = os.environ.get("ROCKIELAB_TENANT_ID")
     if tid and tid.strip():
         return tid.strip()
+    cfg = _load_local_config()
+    tid = cfg.get("tenant_id")
+    if tid and str(tid).strip():
+        return str(tid).strip()
+    legacy = cfg.get("tenant_token")
+    if legacy and str(legacy).strip():
+        return str(legacy).strip()
     raise CLIError(
-        "ROCKIELAB_TENANT_ID is required",
+        "no tenant id configured — set ROCKIELAB_TENANT_ID or write "
+        "~/.rockie/config.json with {\"tenant_id\": \"t-...\"}",
+        exit_code=2,
+    )
+
+
+def _get_admin_token() -> str:
+    """Resolve the admin token for ``--admin-debug`` calls. Raises
+    ``CLIError`` (exit 2) when ``--admin-debug`` is requested but
+    ``ROCKIELAB_ADMIN_TOKEN`` is unset — failing closed rather than
+    silently sending a tenant-only request."""
+    tok = os.environ.get("ROCKIELAB_ADMIN_TOKEN")
+    if tok and tok.strip():
+        return tok.strip()
+    raise CLIError(
+        "--admin-debug requires ROCKIELAB_ADMIN_TOKEN to be set",
         exit_code=2,
     )
 
@@ -136,8 +187,19 @@ def _get_api_base() -> str:
     return cfg.get("api_base") or API_BASE_DEFAULT
 
 
-def _build_headers() -> dict[str, str]:
-    return {
+# ---------------------------------------------------------------------------
+# HTTP helper — stdlib only so we don't drag pip deps into the runtime image
+# ---------------------------------------------------------------------------
+
+
+def _build_request(
+    method: str,
+    path: str,
+    body: Optional[dict],
+    extra_headers: Optional[dict[str, str]] = None,
+) -> urllib.request.Request:
+    url = f"{_get_api_base().rstrip('/')}{path}"
+    headers = {
         "Accept": "application/json",
         # Cloudflare's "browser_signature_banned" rule (error 1010) blocks
         # the default urllib UA. Same mitigation as the rockie-loop daemon
@@ -147,59 +209,53 @@ def _build_headers() -> dict[str, str]:
         "X-Tenant-Token": _get_token(),
         "X-Tenant-Id": _get_tenant_id(),
     }
-
-
-# ---------------------------------------------------------------------------
-# HTTP — small urllib wrapper so tests can monkeypatch the whole layer
-# ---------------------------------------------------------------------------
-
-
-def _http(method: str, path: str, body: Optional[dict] = None) -> Any:
-    """Perform one HTTP call against the resolved API base.
-
-    Returns the decoded JSON body (dict, list, or None for empty 204).
-    Raises :class:`CLIError` on any non-2xx; exit code is 1 for
-    transport errors, 3 for 4xx, 4 for 5xx.
-    """
-    url = _get_api_base().rstrip("/") + path
+    if extra_headers:
+        headers.update(extra_headers)
     data: Optional[bytes] = None
-    headers: dict[str, str] = _build_headers()
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
+    return urllib.request.Request(url, data=data, headers=headers, method=method)
 
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+
+def _parse_http_error(e: urllib.error.HTTPError) -> "CLIError":
     try:
-        with urllib.request.urlopen(req) as resp:
+        payload = json.loads(e.read().decode("utf-8"))
+    except Exception:
+        payload = {"detail": str(e)}
+    code = 3 if 400 <= e.code < 500 else 4
+    return CLIError(
+        f"HTTP {e.code}: {json.dumps(payload)}",
+        exit_code=code,
+        http_status=e.code,
+        payload=payload,
+    )
+
+
+def _http(
+    method: str,
+    path: str,
+    body: Optional[dict] = None,
+    extra_headers: Optional[dict[str, str]] = None,
+) -> Any:
+    req = _build_request(method, path, body, extra_headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             raw = resp.read()
-            if not raw:
-                return None
-            try:
-                return json.loads(raw.decode("utf-8"))
-            except ValueError:
-                return None
+            return json.loads(raw.decode("utf-8")) if raw else None
     except urllib.error.HTTPError as e:
-        parsed_payload: Any = None
-        try:
-            payload = e.read().decode("utf-8")
-            parsed_payload = json.loads(payload) if payload else None
-        except Exception:
-            payload = ""
-        if 400 <= e.code < 500:
-            raise CLIError(
-                f"HTTP {e.code}: {payload or e.reason}",
-                exit_code=3,
-                http_status=e.code,
-                payload=parsed_payload,
-            ) from e
-        raise CLIError(
-            f"HTTP {e.code}: {payload or e.reason}",
-            exit_code=4,
-            http_status=e.code,
-            payload=parsed_payload,
-        ) from e
+        raise _parse_http_error(e) from e
     except urllib.error.URLError as e:
         raise CLIError(f"Network error: {e.reason}", exit_code=1) from e
+
+
+def _admin_headers(args: argparse.Namespace) -> Optional[dict[str, str]]:
+    """Return the ``X-Admin-Token`` header dict when ``--admin-debug`` is
+    set, else ``None``. Centralizes the only place a tenant CLI escalates
+    to the admin (deanonymising) projection of the GPU surface."""
+    if getattr(args, "admin_debug", False):
+        return {"X-Admin-Token": _get_admin_token()}
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -207,116 +263,201 @@ def _http(method: str, path: str, body: Optional[dict] = None) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _emit(payload: Any, human: bool) -> None:
-    """Print ``payload`` in JSON-lines (default) or human form."""
-    if payload is None:
+def _emit_jsonlines(obj: Any) -> None:
+    rows = obj if isinstance(obj, list) else [obj]
+    for row in rows:
+        sys.stdout.write(json.dumps(row, sort_keys=True) + "\n")
+    sys.stdout.flush()
+
+
+def _emit_table(rows: list) -> None:
+    if not rows:
+        print("(no rows)")
         return
+    cols = list(rows[0].keys())
+    widths = {c: max(len(c), max(len(str(r.get(c, ""))) for r in rows)) for c in cols}
+    line = "  ".join(c.ljust(widths[c]) for c in cols)
+    print(line)
+    print("-" * len(line))
+    for r in rows:
+        print("  ".join(str(r.get(c, "")).ljust(widths[c]) for c in cols))
+
+
+def _emit(obj: Any, human: bool = False) -> None:
+    """One JSON object per line by default. ``--human`` formats as a
+    small table (lists) or key:value block (dicts) for ad-hoc debugging."""
     if not human:
-        if isinstance(payload, list):
-            for row in payload:
-                print(json.dumps(row))
-        else:
-            print(json.dumps(payload))
+        _emit_jsonlines(obj)
         return
-
-    # Human mode.
-    if isinstance(payload, dict):
-        for k, v in payload.items():
+    if isinstance(obj, list):
+        _emit_table(obj)
+    else:
+        for k, v in obj.items():
             print(f"{k}: {v}")
-        return
-    if isinstance(payload, list):
-        if not payload:
-            return
-        # Assume list of dicts with consistent keys.
-        keys = list(payload[0].keys()) if isinstance(payload[0], dict) else []
-        if not keys:
-            for row in payload:
-                print(row)
-            return
-        widths = {
-            k: max(len(str(k)), max(len(str(r.get(k, ""))) for r in payload))
-            for k in keys
-        }
-        header = "  ".join(f"{k:<{widths[k]}}" for k in keys)
-        sep = "  ".join("-" * widths[k] for k in keys)
-        print(header)
-        print(sep)
-        for row in payload:
-            print("  ".join(f"{str(row.get(k, '')):<{widths[k]}}" for k in keys))
-        return
-    print(payload)
 
 
 # ---------------------------------------------------------------------------
-# Subcommand handlers
+# Subcommand: market (deidentified, tenant-facing product surface)
 # ---------------------------------------------------------------------------
 
 
-def _cmd_list_prices(args: argparse.Namespace) -> Any:
-    params: list[tuple[str, str]] = []
+def _resolve_tier(args: argparse.Namespace) -> str:
+    """Map the ``--tier`` / ``--spot`` / ``--on-demand`` shortcuts to the
+    server's ``spot|on_demand|any`` query value. Explicit ``--tier`` wins;
+    the shortcuts are sugar for the two common cases."""
+    if getattr(args, "spot_shortcut", False):
+        return "spot"
+    if getattr(args, "on_demand_shortcut", False):
+        return "on_demand"
+    return args.tier
+
+
+def cmd_market(args: argparse.Namespace) -> int:
+    query: dict[str, str] = {}
+    if args.vram_min is not None:
+        query["vram_min"] = str(args.vram_min)
     if args.gpu:
-        params.append(("gpu", args.gpu))
-    # Always send spot — the platform side defaults to False so being
-    # explicit keeps the wire-protocol predictable.
-    params.append(("spot", "true" if args.spot else "false"))
-    if args.provider:
-        params.append(("provider", args.provider))
-    query = urllib.parse.urlencode(params)
-    return _http("GET", f"/api/gpu/prices?{query}")
+        query["gpu_type"] = args.gpu
+    if args.gpu_count != 1:
+        query["gpu_count"] = str(args.gpu_count)
+    tier = _resolve_tier(args)
+    if tier != "any":
+        query["tier"] = tier
+    if args.region != "any":
+        query["region"] = args.region
+    if args.duration != 1.0:
+        query["duration"] = str(args.duration)
+    qs = ("?" + urllib.parse.urlencode(query)) if query else ""
+    result = _http(
+        "GET", f"/api/gpu/market{qs}", extra_headers=_admin_headers(args)
+    )
+    rows = result.get("rows", []) if isinstance(result, dict) else []
+    summary = result.get("summary") if isinstance(result, dict) else None
+
+    if args.human:
+        # The table header copy is load-bearing: it MUST read "Rockie GPU
+        # capacity pools" and MUST NOT carry a provider column. The rows are
+        # already deidentified server-side (no provider key) unless the
+        # caller is a verified admin via --admin-debug.
+        if isinstance(summary, dict) and summary.get("summary"):
+            print(summary["summary"])
+        else:
+            considered = (
+                summary.get("provider_count_considered")
+                if isinstance(summary, dict)
+                else None
+            ) or len(rows)
+            print(f"Compared {considered} Rockie GPU capacity pools.")
+        _emit_table(rows)
+        return 0
+
+    # JSON-lines: one deidentified candidate row per line, then the summary.
+    _emit_jsonlines(rows)
+    if summary is not None:
+        _emit_jsonlines(summary)
+    return 0
 
 
-def _cmd_provision(args: argparse.Namespace) -> Any:
+# ---------------------------------------------------------------------------
+# Subcommand: provision
+# ---------------------------------------------------------------------------
+
+
+def cmd_provision(args: argparse.Namespace) -> int:
+    # Tenant body: opaque candidate selection + budget. The provider is
+    # NEVER tenant-supplied — it is resolved server-side from candidate_id /
+    # quote_token. --provider is admin-only and rejected without --admin-debug.
     body: dict[str, Any] = {
         "gpu_type": args.gpu,
+        "gpu_count": args.gpu_count,
         "hours": args.hours,
-        "spot": bool(args.spot),
-        "dry_run": bool(args.dry_run),
+        "spot": args.spot,
+        "dry_run": args.dry_run,
     }
+    if args.candidate_id:
+        body["candidate_id"] = args.candidate_id
+    if args.quote_token:
+        body["quote_token"] = args.quote_token
+    if args.budget_cents is not None:
+        body["budget_cents"] = args.budget_cents
+    if args.max_runtime is not None:
+        body["max_runtime_seconds"] = args.max_runtime
+    if args.re_quote_pct is not None:
+        body["re_quote_pct"] = args.re_quote_pct
+
+    admin = _admin_headers(args)
     if args.provider:
+        if admin is None:
+            raise CLIError(
+                "--provider is admin-only; pass --admin-debug to target a "
+                "provider (the tenant market resolves the provider server-side)",
+                exit_code=2,
+            )
         body["provider"] = args.provider
-    result = _http("POST", "/api/gpu/provision", body=body)
-    if not isinstance(result, dict) or result.get("dry_run"):
-        return result
 
-    pod_id = result.get("pod_id")
-    provider = result.get("provider") or args.provider or "runpod"
-    if not pod_id:
-        return CommandOutcome(
-            _provision_unverified_payload(
-                result,
-                tenant_id=_get_tenant_id(),
-                provider=provider,
-                error_code="missing_pod_id",
-                error_message="Broker provision response did not include pod_id.",
-            ),
-            exit_code=3,
-        )
-
-    status_path = (
-        f"/api/gpu/pods/{urllib.parse.quote(str(pod_id), safe='')}/status?"
-        f"{urllib.parse.urlencode({'provider': str(provider)})}"
-    )
     try:
-        status_result = _http("GET", status_path)
-    except CLIError as e:
-        return CommandOutcome(
-            _provision_unverified_payload(
-                result,
-                tenant_id=_get_tenant_id(),
-                provider=provider,
-                error_code=_error_code_from_payload(e.payload),
-                error_message=e.message,
-                http_status=e.http_status,
-            ),
-            exit_code=e.exit_code,
+        result = _http(
+            "POST", "/api/gpu/provision", body=body, extra_headers=admin
         )
+    except CLIError as e:
+        unverified = _server_provision_unverified_payload(e.payload)
+        if unverified is not None:
+            _emit(unverified, human=args.human)
+            return e.exit_code
+        raise
 
-    verified = dict(result)
-    verified["tenant_id"] = _get_tenant_id()
-    verified["ownership_check_status"] = "VERIFIED"
-    verified["ownership_check_path"] = status_path
-    verified["broker_status"] = status_result
-    return verified
+    # Admin-debug provisions can still pin a provider and re-verify ownership
+    # the legacy way. Tenant (deidentified) provisions get the budgeted S3
+    # response verbatim — it carries no provider and its own
+    # ownership_check_status / signed_job_descriptor, so a second
+    # provider-keyed status hop would both fail (no provider) and leak.
+    if (
+        admin is not None
+        and args.provider
+        and isinstance(result, dict)
+        and not result.get("dry_run")
+    ):
+        pod_id = result.get("pod_id")
+        provider = result.get("provider") or args.provider
+        if pod_id:
+            status_path = (
+                f"/api/gpu/pods/{urllib.parse.quote(str(pod_id), safe='')}/status"
+                f"?{urllib.parse.urlencode({'provider': str(provider)})}"
+            )
+            try:
+                status_result = _http("GET", status_path, extra_headers=admin)
+            except CLIError as e:
+                _emit(
+                    _provision_unverified_payload(
+                        result,
+                        tenant_id=_get_tenant_id(),
+                        provider=provider,
+                        error_code=_error_code_from_payload(e.payload),
+                        error_message=str(e),
+                        http_status=e.http_status,
+                    ),
+                    human=args.human,
+                )
+                return e.exit_code
+            result = dict(result)
+            result["tenant_id"] = _get_tenant_id()
+            result["ownership_check_status"] = "VERIFIED"
+            result["ownership_check_path"] = status_path
+            result["broker_status"] = status_result
+        else:
+            _emit(
+                _provision_unverified_payload(
+                    result,
+                    tenant_id=_get_tenant_id(),
+                    provider=provider,
+                    error_code="missing_pod_id",
+                    error_message="Broker provision response did not include pod_id.",
+                ),
+                human=args.human,
+            )
+            return 3
+    _emit(result, human=args.human)
+    return 0
 
 
 def _error_code_from_payload(payload: Any) -> str:
@@ -330,6 +471,18 @@ def _error_code_from_payload(payload: Any) -> str:
         if isinstance(error, dict) and error.get("code"):
             return str(error["code"])
     return "ownership_check_failed"
+
+
+def _server_provision_unverified_payload(payload: Any) -> Optional[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    detail = payload.get("detail")
+    if not isinstance(detail, dict):
+        return None
+    error = detail.get("error")
+    if not isinstance(error, dict) or error.get("code") != "PROVISION_UNVERIFIED":
+        return None
+    return detail
 
 
 def _provision_unverified_payload(
@@ -363,105 +516,294 @@ def _provision_unverified_payload(
     }
 
 
-def _cmd_status(args: argparse.Namespace) -> Any:
-    provider = args.provider or "runpod"
-    path = f"/api/gpu/pods/{args.pod_id}/status?provider={provider}"
-    return _http("GET", path)
+# ---------------------------------------------------------------------------
+# Subcommand: audit-open-spend
+# ---------------------------------------------------------------------------
 
 
-def _cmd_spent(args: argparse.Namespace) -> Any:
-    return _http("GET", "/api/gpu/spent")
-
-
-def _cmd_teardown(args: argparse.Namespace) -> Any:
-    provider = args.provider or "runpod"
-    path = f"/api/gpu/pods/{args.pod_id}?provider={provider}"
-    _http("DELETE", path)
-    # 204 returns None; surface a sentinel so the user sees something.
-    return {"state": "TORN_DOWN"}
+def cmd_audit_open_spend(args: argparse.Namespace) -> int:
+    admin = _admin_headers(args)
+    query: dict[str, str] = {}
+    if args.demo_safe:
+        query["demo_safe"] = "true"
+    # ``--tenant`` is admin-only. The server ignores it for tenant callers,
+    # but we refuse to even send it without --admin-debug so the intent is
+    # explicit and a tenant can't accidentally believe they audited another.
+    if args.tenant:
+        if admin is None:
+            raise CLIError(
+                "--tenant is admin-only; pass --admin-debug to audit another "
+                "tenant (tenant callers always audit themselves)",
+                exit_code=2,
+            )
+        query["tenant"] = args.tenant
+    qs = ("?" + urllib.parse.urlencode(query)) if query else ""
+    result = _http(
+        "GET", f"/api/gpu/audit-open-spend{qs}", extra_headers=admin
+    )
+    _emit(result, human=args.human)
+    return 0
 
 
 # ---------------------------------------------------------------------------
-# Parser
+# Subcommand: list-prices (DEPRECATED — use market)
 # ---------------------------------------------------------------------------
+
+
+def cmd_list_prices(args: argparse.Namespace) -> int:
+    # Deprecation advisory goes to STDERR so it never pollutes the JSON-lines
+    # stdout an agent parses. The command keeps working — it just routes to
+    # the deidentified /prices surface and nudges the caller toward `market`.
+    sys.stderr.write(
+        "rockie-gpu: list-prices is deprecated; use rockie-gpu market\n"
+    )
+    query: dict[str, str] = {}
+    if args.gpu:
+        query["gpu"] = args.gpu
+    if args.spot:
+        query["spot"] = "true"
+    if args.provider:
+        query["provider"] = args.provider
+    qs = ("?" + urllib.parse.urlencode(query)) if query else ""
+    rows = _http("GET", f"/api/gpu/prices{qs}")
+    _emit(rows or [], human=args.human)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: status
+# ---------------------------------------------------------------------------
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    qs = "?" + urllib.parse.urlencode({"provider": args.provider})
+    result = _http("GET", f"/api/gpu/pods/{args.pod_id}/status{qs}")
+    _emit(result, human=args.human)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: spent
+# ---------------------------------------------------------------------------
+
+
+def cmd_spent(args: argparse.Namespace) -> int:
+    result = _http("GET", "/api/gpu/spent")
+    _emit(result, human=args.human)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: teardown
+# ---------------------------------------------------------------------------
+
+
+def cmd_teardown(args: argparse.Namespace) -> int:
+    qs = "?" + urllib.parse.urlencode({"provider": args.provider})
+    _http("DELETE", f"/api/gpu/pods/{args.pod_id}{qs}")
+    _emit(
+        {"pod_id": args.pod_id, "provider": args.provider, "state": "TORN_DOWN"},
+        human=args.human,
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# argparse
+# ---------------------------------------------------------------------------
+
+
+def _add_human(p: argparse.ArgumentParser) -> None:
+    """Accept ``--human`` BOTH before the subcommand (``rockie-gpu --human
+    spent``) and after it (``rockie-gpu market --human``). The subcommand
+    form writes a separate dest so it never clobbers a top-level ``--human``
+    back to False; ``main`` ORs the two."""
+    p.add_argument(
+        "--human",
+        dest="human_sub",
+        action="store_true",
+        default=False,
+        help="Human-readable output (default: JSON-lines).",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rockie-gpu",
-        description="Manage GPU compute through the Rockie broker.",
+        description="Rockie GPU broker CLI (agent-facing).",
     )
     parser.add_argument(
         "--human",
         action="store_true",
-        help="Pretty output (k: v dicts, ascii table for lists).",
+        help="Human-readable output (default: JSON-lines).",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    # `list` is an argparse alias for `list-prices` (operators reach for the
-    # shorter form first). Same subparser, same handler — so `args.func is`
-    # equality holds for both invocations.
-    p_list = sub.add_parser(
-        "list-prices",
-        aliases=["list"],
-        help="Ranked unified price list across all configured providers.",
+    # ---- market (deidentified, tenant-facing) ----
+    p_market = sub.add_parser(
+        "market",
+        help="Shop the ranked, deidentified Rockie GPU market.",
     )
-    p_list.add_argument("--gpu", default=None, help="Filter by GPU type id.")
-    p_list.add_argument(
-        "--spot", action="store_true", help="Spot/preemptible quotes."
+    p_market.add_argument("--vram-min", type=int, default=None, dest="vram_min")
+    p_market.add_argument("--gpu", default=None, help="Filter by gpu_type.")
+    p_market.add_argument("--gpu-count", type=int, default=1, dest="gpu_count")
+    p_market.add_argument(
+        "--tier",
+        choices=("spot", "on_demand", "any"),
+        default="any",
+        help="Capacity tier (spot|on_demand|any).",
     )
-    p_list.add_argument(
+    p_market.add_argument(
+        "--spot",
+        dest="spot_shortcut",
+        action="store_true",
+        help="Shortcut for --tier spot.",
+    )
+    p_market.add_argument(
+        "--on-demand",
+        dest="on_demand_shortcut",
+        action="store_true",
+        help="Shortcut for --tier on_demand.",
+    )
+    p_market.add_argument(
+        "--region", choices=("us", "eu", "any"), default="any"
+    )
+    p_market.add_argument("--duration", type=float, default=1.0)
+    p_market.add_argument(
+        "--admin-debug",
+        dest="admin_debug",
+        action="store_true",
+        help="ADMIN: send X-Admin-Token to reveal provider columns.",
+    )
+    _add_human(p_market)
+    p_market.set_defaults(func=cmd_market)
+
+    # ---- provision ----
+    p_prov = sub.add_parser(
+        "provision",
+        help="Provision capacity from the market (provider resolved server-side).",
+    )
+    p_prov.add_argument("--gpu", required=True, help="GPU type (e.g. A100_80GB).")
+    p_prov.add_argument("--gpu-count", type=int, default=1)
+    p_prov.add_argument(
+        "--hours", type=float, required=True, help="Estimated hours."
+    )
+    p_prov.add_argument("--spot", action="store_true", default=True)
+    p_prov.add_argument("--on-demand", dest="spot", action="store_false")
+    # Candidate selection — opaque handles from `market`. --best is the
+    # default when neither candidate handle is supplied.
+    p_prov.add_argument(
+        "--best",
+        action="store_true",
+        default=True,
+        help="Let the broker pick the best market candidate (default).",
+    )
+    p_prov.add_argument("--candidate-id", default=None, dest="candidate_id")
+    p_prov.add_argument("--quote-token", default=None, dest="quote_token")
+    p_prov.add_argument("--budget-cents", type=int, default=None, dest="budget_cents")
+    p_prov.add_argument(
+        "--max-runtime", type=int, default=None, dest="max_runtime"
+    )
+    p_prov.add_argument(
+        "--re-quote-pct", type=float, default=None, dest="re_quote_pct"
+    )
+    p_prov.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Exercise the full broker → credit path but stub the actual "
+            "provider call. Refunds the debit before returning."
+        ),
+    )
+    p_prov.add_argument(
+        "--admin-debug",
+        dest="admin_debug",
+        action="store_true",
+        help="ADMIN: send X-Admin-Token (enables --provider targeting).",
+    )
+    # --provider is admin-only; cmd_provision rejects it without --admin-debug.
+    p_prov.add_argument(
         "--provider",
         default=None,
-        help="Filter to a single provider (e.g. runpod, lambda).",
+        help="ADMIN-ONLY (requires --admin-debug): pin a provider.",
     )
-    p_list.set_defaults(func=_cmd_list_prices)
+    _add_human(p_prov)
+    p_prov.set_defaults(func=cmd_provision)
 
-    p_prov = sub.add_parser("provision", help="Provision a GPU pod.")
-    p_prov.add_argument("--gpu", required=True, help="GPU type id.")
-    p_prov.add_argument(
-        "--hours", required=True, type=float, help="Estimated runtime hours."
+    # ---- audit-open-spend ----
+    p_audit = sub.add_parser(
+        "audit-open-spend",
+        help="Prove nothing is still costing money (S6 acceptance surface).",
     )
-    p_prov.add_argument("--spot", action="store_true")
-    p_prov.add_argument("--dry-run", action="store_true")
-    p_prov.add_argument("--provider", default=None)
-    p_prov.set_defaults(func=_cmd_provision)
+    p_audit.add_argument(
+        "--demo-safe",
+        dest="demo_safe",
+        action="store_true",
+        help="Tear down + settle everything open, then re-audit.",
+    )
+    p_audit.add_argument(
+        "--tenant",
+        default=None,
+        help="ADMIN-ONLY (requires --admin-debug): audit a specific tenant.",
+    )
+    p_audit.add_argument(
+        "--admin-debug",
+        dest="admin_debug",
+        action="store_true",
+        help="ADMIN: send X-Admin-Token for provider-labeled reconciliation.",
+    )
+    _add_human(p_audit)
+    p_audit.set_defaults(func=cmd_audit_open_spend)
 
-    p_stat = sub.add_parser("status", help="Pod status.")
-    p_stat.add_argument("pod_id")
-    p_stat.add_argument("--provider", default=None)
-    p_stat.set_defaults(func=_cmd_status)
+    # ---- list-prices (DEPRECATED) ----
+    p_prices = sub.add_parser(
+        "list-prices",
+        aliases=["list"],
+        help="DEPRECATED — use `market`. Ranked deidentified price list.",
+    )
+    p_prices.add_argument("--gpu", help="Filter by gpu_type (e.g. A100_80GB).")
+    p_prices.add_argument(
+        "--spot", action="store_true", help="Show spot/preemptible quotes."
+    )
+    p_prices.add_argument("--provider", default=None, help="Filter to one provider.")
+    _add_human(p_prices)
+    p_prices.set_defaults(func=cmd_list_prices)
 
-    p_spent = sub.add_parser("spent", help="Current-period spend.")
-    p_spent.set_defaults(func=_cmd_spent)
+    p_status = sub.add_parser("status", help="Pod status + utilization.")
+    p_status.add_argument("pod_id")
+    p_status.add_argument("--provider", default="runpod")
+    _add_human(p_status)
+    p_status.set_defaults(func=cmd_status)
 
-    p_tear = sub.add_parser("teardown", help="Terminate a pod.")
-    p_tear.add_argument("pod_id")
-    p_tear.add_argument("--provider", default=None)
-    p_tear.set_defaults(func=_cmd_teardown)
+    p_spent = sub.add_parser(
+        "spent", help="Current calendar-period spend for this tenant."
+    )
+    _add_human(p_spent)
+    p_spent.set_defaults(func=cmd_spent)
+
+    p_teardown = sub.add_parser(
+        "teardown", help="Tear down a pod (idempotent — 404 == success)."
+    )
+    p_teardown.add_argument("pod_id")
+    p_teardown.add_argument("--provider", default="runpod")
+    _add_human(p_teardown)
+    p_teardown.set_defaults(func=cmd_teardown)
 
     return parser
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-
-def main(argv: list[str]) -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # ``--human`` is accepted both before and after the subcommand; OR the
+    # two parse positions into the single ``human`` flag the handlers read.
+    args.human = bool(getattr(args, "human", False) or getattr(args, "human_sub", False))
     try:
-        result = args.func(args)
+        return args.func(args)
     except CLIError as e:
-        print(e.message, file=sys.stderr)
+        sys.stderr.write(f"rockie-gpu: {e}\n")
         return e.exit_code
-    if isinstance(result, CommandOutcome):
-        _emit(result.payload, human=bool(args.human))
-        return result.exit_code
-    _emit(result, human=bool(args.human))
-    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main())
