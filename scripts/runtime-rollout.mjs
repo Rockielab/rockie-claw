@@ -237,11 +237,12 @@ async function pollAsyncRollout({
   attempts,
   pollIntervalMs = 5000,
   maxPolls = 360, // 30 minutes / 5s = 360 polls
+  timeoutMs = 180000, // 180s per poll request; matches default ROLLOUT_CURL_MAX_TIME
 }) {
   const url = adminRolloutPollUrl(base, rolloutId);
   for (let i = 0; i < maxPolls; i += 1) {
     const response = await request("GET", url, {
-      timeoutMs: ROLLOUT_CURL_MAX_TIME * 1000,
+      timeoutMs,
       headers: {
         "X-Admin-Token": adminToken,
         Authorization: `Bearer ${apiPassword}`,
@@ -624,6 +625,7 @@ export async function runRollout() {
           adminToken,
           apiPassword,
           attempts,
+          timeoutMs,
         });
         finalCode = polled.code;
         finalBody = polled.body;
