@@ -365,14 +365,28 @@ def test_entrypoint_calls_warm_in_subscription_mode(tmp_path: Path) -> None:
     absent and this test would fail.
     """
     marker = tmp_path / "warm_invoked.txt"
+    release = tmp_path / "broker_release.txt"
     body = _extract_subscription_branch()
     harness = (
         'log() { printf "[entrypoint] %s\\n" "$*" >&2; }\n'
-        # Stub the warm step: record that the real branch called it.
-        f'warm_subscription_binary() {{ : > "{marker}"; }}\n'
-        # Provide a fast-finishing broker so `wait -n "$BROKER_PID"` returns
-        # instead of hanging the test.
-        "( exit 0 ) &\n"
+        # Stub the warm step: record that the real branch called it, then
+        # release the broker so the arm's trailing `wait -n "$BROKER_PID"`
+        # returns. The release is the proof-of-invocation signal — if warm
+        # were never called (dead branch / commented-out call), the broker is
+        # never released and falls through its bounded fallback below, leaving
+        # the marker ABSENT so the assertion fails cleanly (no hang).
+        f'warm_subscription_binary() {{ : > "{marker}"; : > "{release}"; }}\n'
+        # The broker must be a REAL, still-LIVE child when the arm reaches
+        # `wait -n "$BROKER_PID"` — otherwise the prior harness raced: a
+        # `( exit 0 ) &` job exits and is reaped before the wait, and on
+        # Linux bash `wait -n <reaped-pid>` errors "no such job" -> 127,
+        # failing the script (passed on macOS bash only by luck of timing).
+        # This broker blocks until warm releases it (or a ~5s bounded
+        # fallback, well under the 15s subprocess timeout), then exits 0 so
+        # the harness returncode stays 0 in both the normal and mutation
+        # (warm-not-called) cases.
+        f'( for _ in $(seq 1 250); do [ -f "{release}" ] && break; '
+        "sleep 0.02; done; exit 0 ) &\n"
         "BROKER_PID=$!\n"
         # `command -v claude/codex` in the branch must not abort under set -e
         # style strictness; the arm tolerates missing binaries already.
