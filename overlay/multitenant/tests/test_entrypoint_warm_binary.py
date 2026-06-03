@@ -28,7 +28,9 @@ Run from the repo root with:
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -36,6 +38,45 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 OVERLAY = REPO_ROOT / "overlay" / "multitenant"
 ENTRYPOINT = OVERLAY / "entrypoint.sh"
 DOCKERFILE = REPO_ROOT / "Dockerfile.multitenant"
+
+
+def _bash_supporting_wait_n() -> str:
+    """Return a bash interpreter that supports the ``wait -n`` builtin.
+
+    The production image runs a modern bash (>= 4.3); macOS ships the
+    ancient 3.2 as ``/bin/bash`` which lacks ``wait -n``. The entrypoint's
+    subscription arm uses ``wait -n``, so executing that arm requires a
+    capable interpreter. Probe common locations and return an ABSOLUTE
+    path, so callers that pass a restricted ``PATH`` env still hit the
+    capable interpreter rather than re-resolving to ``/bin/bash`` 3.2.
+    """
+    candidates = [
+        shutil.which("bash"),
+        "/opt/homebrew/bin/bash",
+        "/usr/local/bin/bash",
+        "/bin/bash",
+    ]
+    for cand in candidates:
+        if not cand:
+            continue
+        try:
+            # Background a trivial job and `wait -n` for it. A capable bash
+            # (>= 4.3) succeeds silently; bash 3.2 writes
+            # "wait: -n: invalid option" to stderr.
+            probe = subprocess.run(
+                [cand, "-c", "( : ) & wait -n"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if "invalid option" not in probe.stderr:
+            return cand
+    return "bash"
+
+
+BASH = _bash_supporting_wait_n()
 
 
 def _extract_function(name: str) -> str:
@@ -108,6 +149,159 @@ def _run_warm(
     return proc, env_seen
 
 
+def _run_warm_nonblocking(
+    tmp_path: Path,
+    *,
+    binary: str = "claude",
+    warm_sleep_seconds: int = 10,
+    boot_deadline_seconds: float = 6.0,
+) -> tuple[float, Path, Path, Path]:
+    """Run warm_subscription_binary() against a fake binary whose
+    ``--version`` is *slow* (``sleep <warm_sleep_seconds>``), and measure
+    how long the entrypoint's boot path takes to get *past* the warm call.
+
+    This harness mimics the real entrypoint: it calls warm and then
+    proceeds (it does NOT ``wait`` for backgrounded children). Two
+    subtleties make the timing honest:
+
+      * The fake binary records a ``warm_started`` marker, sleeps, then a
+        ``warm_finished`` marker — so we can prove warm actually fired and
+        is still running when boot continues.
+      * The boot path writes a ``boot_continued`` marker the instant warm
+        returns. We poll that file rather than waiting on
+        ``subprocess.run`` to return, because a backgrounded subshell
+        inherits the bash pipes and would keep them open until its
+        ``sleep`` ends — that is a pipe-drain artifact, not boot blocking.
+        Polling the marker measures the real boot-path latency.
+
+    The bash process's own stdout/stderr are redirected to log files
+    (not OS pipes) so the launcher never blocks on FD inheritance.
+
+    Returns ``(elapsed_to_boot_continue, started_marker, finished_marker,
+    log_file)``.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    started_marker = tmp_path / "warm_started.txt"
+    finished_marker = tmp_path / "warm_finished.txt"
+    boot_marker = tmp_path / "boot_continued.txt"
+    log_file = tmp_path / "entrypoint.log"
+
+    # Fake binary: on --version, record that warm actually fired, sleep to
+    # simulate a slow cold start, then record completion. If warm runs in
+    # the foreground, the sleep blocks the boot path; in the background it
+    # does not.
+    (bindir / binary).write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "--version" ]; then\n'
+        f'  : > "{started_marker}"\n'
+        f"  sleep {warm_sleep_seconds}\n"
+        f'  : > "{finished_marker}"\n'
+        '  echo "fake $0 2.1.0"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    (bindir / binary).chmod(0o755)
+
+    body = _extract_function("warm_subscription_binary")
+    # No trailing `wait`: this is the boot path. Call warm, then drop the
+    # boot-continued marker the instant control returns. Redirect all bash
+    # output to a log file so the launching process never inherits a pipe
+    # held open by the backgrounded warm subshell.
+    harness = (
+        'log() { printf "[entrypoint] %s\\n" "$*" >&2; }\n'
+        f"warm_subscription_binary() {{\n{body}\n}}\n"
+        "warm_subscription_binary\n"
+        f': > "{boot_marker}"\n'
+        # Keep the foreground process alive briefly so the test can observe
+        # that warm is still running in the background (boot did not wait).
+        f"sleep {warm_sleep_seconds + 5}\n"
+    )
+    env = {
+        "PATH": f"{bindir}:/usr/bin:/bin",
+        "BINARY": binary,
+    }
+    start = time.monotonic()
+    log_fh = log_file.open("w", encoding="utf-8")
+    proc = subprocess.Popen(
+        [BASH, "-c", harness],
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+        env=env,
+    )
+    try:
+        # Poll for the boot-continued marker. With `&` present this appears
+        # near-instantly; without it, only after the warm sleep/timeout.
+        deadline = start + boot_deadline_seconds
+        while not boot_marker.exists() and time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.02)
+        elapsed = (
+            time.monotonic() - start
+            if boot_marker.exists()
+            else boot_deadline_seconds
+        )
+        # Let the backgrounded warm subshell actually exec the fake binary
+        # so ``warm_started`` lands. This proves warm is running CONCURRENTLY
+        # with the (already-continued) boot path — the falsifiable property.
+        # Bounded well below the 10s warm sleep so it cannot mask blocking.
+        started_deadline = time.monotonic() + 3.0
+        while (
+            not started_marker.exists()
+            and time.monotonic() < started_deadline
+            and proc.poll() is None
+        ):
+            time.sleep(0.02)
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+        log_fh.close()
+    return elapsed, started_marker, finished_marker, log_file
+
+
+def test_warm_returns_immediately_and_does_not_block_boot(
+    tmp_path: Path,
+) -> None:
+    """Boot-safety property: warming must run in the BACKGROUND, so the
+    entrypoint continues immediately and never blocks broker/boot.
+
+    The fake binary's ``--version`` sleeps 10s. With the ``&`` present the
+    warm subshell is detached and the boot path returns in well under 2s
+    while warm is still mid-sleep. This test FAILS (boot-continue latency
+    jumps to ~sleep, or the in-source ``timeout 20``) if the ``&``
+    background operator is removed from ``warm_subscription_binary`` —
+    that is the whole point of the feature.
+    """
+    elapsed, started_marker, finished_marker, log_file = _run_warm_nonblocking(
+        tmp_path, warm_sleep_seconds=10, boot_deadline_seconds=6.0
+    )
+    log = log_file.read_text(encoding="utf-8")
+    # Sanity: warm actually fired (the fake --version was invoked), so the
+    # fast return is genuine backgrounding, not warm being skipped.
+    assert started_marker.exists(), (
+        "warm never invoked the binary --version; a fast boot would be a "
+        f"false pass. log:\n{log}"
+    )
+    assert "warming claude --version" in log, log
+    # The boot path must not have blocked on the 10s warm. Background == fast.
+    assert elapsed < 2.0, (
+        f"entrypoint blocked {elapsed:.2f}s on the warm call; warm must run "
+        "in the background (`&`) so it never blocks boot. Did the `&` get "
+        f"removed from warm_subscription_binary()?\nlog:\n{log}"
+    )
+    # And prove the boot continued WHILE warm was still running: the slow
+    # warm had not finished when boot resumed. This is what makes the test
+    # falsifiable — a foreground warm could only continue after finishing.
+    assert not finished_marker.exists(), (
+        "warm completed before boot continued, so we cannot distinguish "
+        "background from a fast foreground run; the test is not falsifiable "
+        f"as written. elapsed={elapsed:.2f}s log:\n{log}"
+    )
+
+
 def test_warm_runs_claude_and_disables_autoupdater(tmp_path: Path) -> None:
     proc, env_seen = _run_warm(tmp_path, binary="claude")
     assert proc.returncode == 0, proc.stderr
@@ -150,14 +344,53 @@ def test_warm_is_nonfatal_when_binary_errors(tmp_path: Path) -> None:
     assert "warm-up exited non-zero (non-fatal)" in proc.stderr
 
 
-def test_entrypoint_calls_warm_in_subscription_mode() -> None:
+def _extract_subscription_branch() -> str:
+    """Pull the body of the ``subscription)`` case arm out of entrypoint.sh
+    so it can be executed in isolation."""
     src = ENTRYPOINT.read_text(encoding="utf-8")
-    # The subscription branch must invoke the warm step.
-    sub_idx = src.index("MODE=subscription;")
-    wait_idx = src.index('wait -n "$BROKER_PID"')
-    warm_idx = src.index("warm_subscription_binary\n", sub_idx)
-    # Warm is called inside the subscription branch, before the broker wait.
-    assert sub_idx < warm_idx < wait_idx
+    pattern = re.compile(
+        r"^\s*subscription\)\n(?P<body>.*?)^\s*;;\n",
+        re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(src)
+    assert m is not None, "subscription) case arm not found in entrypoint.sh"
+    return m.group("body")
+
+
+def test_entrypoint_calls_warm_in_subscription_mode(tmp_path: Path) -> None:
+    """Actually execute the subscription case arm and prove the real code
+    path invokes warm_subscription_binary — not just that the string is
+    present. ``warm_subscription_binary`` is stubbed to drop a marker file;
+    if the branch were dead or the call commented out, the marker would be
+    absent and this test would fail.
+    """
+    marker = tmp_path / "warm_invoked.txt"
+    body = _extract_subscription_branch()
+    harness = (
+        'log() { printf "[entrypoint] %s\\n" "$*" >&2; }\n'
+        # Stub the warm step: record that the real branch called it.
+        f'warm_subscription_binary() {{ : > "{marker}"; }}\n'
+        # Provide a fast-finishing broker so `wait -n "$BROKER_PID"` returns
+        # instead of hanging the test.
+        "( exit 0 ) &\n"
+        "BROKER_PID=$!\n"
+        # `command -v claude/codex` in the branch must not abort under set -e
+        # style strictness; the arm tolerates missing binaries already.
+        "MODE=subscription\n"
+        f"{body}\n"
+    )
+    proc = subprocess.run(
+        [BASH, "-c", harness],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+        timeout=15,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert marker.exists(), (
+        "subscription branch did not invoke warm_subscription_binary; the "
+        f"call is missing or in a dead branch.\nstderr:\n{proc.stderr}"
+    )
 
 
 def test_dockerfile_disables_self_updater() -> None:
