@@ -72,14 +72,49 @@ def test_tenant_id_env_var_is_used(cli, monkeypatch):
     assert cli._get_tenant_id() == "t-aaa"
 
 
-def test_tenant_dev_token_alias_is_used_for_auth(cli, monkeypatch):
-    monkeypatch.setenv("ROCKIELAB_TENANT_DEV_TOKEN", "dev-service-token")
+def test_broker_tenant_token_alias_is_used_for_auth(cli, monkeypatch):
+    # Post-#1123 the token ladder is ROCKIELAB_TENANT_TOKEN ->
+    # BROKER_TENANT_TOKEN -> config `tenant_token` (see the module
+    # docstring "Resolution order for the tenant auth token"). The old
+    # ROCKIELAB_TENANT_DEV_TOKEN alias was dropped in the S7 rewrite, so
+    # the legacy alias honored today is BROKER_TENANT_TOKEN.
+    monkeypatch.setenv("BROKER_TENANT_TOKEN", "broker-service-token")
 
-    assert cli._get_token() == "dev-service-token"
+    assert cli._get_token() == "broker-service-token"
 
 
-def test_config_file_tenant_token_is_not_identity(cli, tmp_path):
+def test_canonical_tenant_token_wins_over_broker_alias(cli, monkeypatch):
+    # The canonical env var takes precedence over the legacy alias —
+    # falsifies a "last writer wins" / reversed-ladder regression.
+    monkeypatch.setenv("ROCKIELAB_TENANT_TOKEN", "canonical-token")
+    monkeypatch.setenv("BROKER_TENANT_TOKEN", "broker-service-token")
+
+    assert cli._get_token() == "canonical-token"
+
+
+def test_config_file_tenant_token_is_legacy_identity_fallback(cli, tmp_path):
+    # Post-#1123 _get_tenant_id() falls back to the config `tenant_token`
+    # as a legacy identity source (older installs used the token as the
+    # tenant id before X-Tenant-Id existed — see the module docstring
+    # "tenant_token legacy fallback"). With nothing else configured the
+    # token value is returned as the tenant id rather than raising.
     _write_config(tmp_path, {"tenant_token": "t-ccc"})
+    assert cli._get_tenant_id() == "t-ccc"
+
+
+def test_config_file_tenant_id_wins_over_legacy_token(cli, tmp_path):
+    # When both keys are present the explicit `tenant_id` wins over the
+    # legacy `tenant_token` fallback — falsifies a ladder that consults
+    # the legacy key first.
+    _write_config(tmp_path, {"tenant_id": "t-real", "tenant_token": "t-legacy"})
+    assert cli._get_tenant_id() == "t-real"
+
+
+def test_no_tenant_id_anywhere_raises_usage_error(cli):
+    # Neither env nor config provides any identity source -> exit 2 with
+    # the ROCKIELAB_TENANT_ID guidance. Keeps the "fail closed on missing
+    # identity" contract falsifiable now that the happy path no longer
+    # raises for a config tenant_token.
     with pytest.raises(cli.CLIError) as excinfo:
         cli._get_tenant_id()
     assert excinfo.value.exit_code == 2
@@ -98,11 +133,31 @@ def test_get_token_raises_when_nothing_set(cli):
 
 
 def test_build_request_sends_auth_token_and_tenant_id(cli, monkeypatch):
+    # Post-#1123 the header-building logic lives inside _build_request,
+    # which returns a urllib.request.Request — there is no standalone
+    # _build_headers() helper. Assert the auth + identity headers land
+    # on the request object.
     monkeypatch.setenv("ROCKIELAB_TENANT_TOKEN", "service-token")
     monkeypatch.setenv("ROCKIELAB_TENANT_ID", "t-aaa")
-    headers = cli._build_headers()
-    assert headers["X-Tenant-Token"] == "service-token"
-    assert headers["X-Tenant-Id"] == "t-aaa"
+    req = cli._build_request("GET", "/api/gpu/prices", None)
+    # urllib title-cases header keys internally; get_header() re-titles
+    # the lookup key so this comparison is case-stable.
+    assert req.get_header("X-tenant-token") == "service-token"
+    assert req.get_header("X-tenant-id") == "t-aaa"
+
+
+def test_build_request_threads_extra_headers(cli, monkeypatch):
+    # The extra_headers keyword (admin-debug X-Admin-Token path) must be
+    # merged onto the request without clobbering the tenant headers.
+    monkeypatch.setenv("ROCKIELAB_TENANT_TOKEN", "service-token")
+    monkeypatch.setenv("ROCKIELAB_TENANT_ID", "t-aaa")
+    req = cli._build_request(
+        "POST", "/api/gpu/provision", {"gpu_type": "A40_48GB"},
+        extra_headers={"X-Admin-Token": "admin-secret"},
+    )
+    assert req.get_header("X-admin-token") == "admin-secret"
+    assert req.get_header("X-tenant-token") == "service-token"
+    assert req.get_header("X-tenant-id") == "t-aaa"
 
 
 # ---------------------------------------------------------------------------
@@ -157,15 +212,30 @@ def test_list_alias_dispatches_to_list_prices_handler(cli):
     assert alias.func is canonical.func
 
 
-def test_provision_verifies_broker_status_before_success(
+# ---------------------------------------------------------------------------
+# provision: post-#1123 the client-side ownership re-verification (the
+# second provider-keyed status GET, plus tenant_id / ownership_check_status
+# injection) only runs on the ADMIN-DEBUG + --provider path. cmd_provision
+# gates it on ``admin is not None and args.provider`` (S7 #1123) because the
+# deidentified tenant response carries no provider and its own server-side
+# ownership_check_status, so a second provider-keyed hop would both fail and
+# leak. The default tenant path emits the budgeted broker response verbatim.
+# ---------------------------------------------------------------------------
+
+
+def test_admin_debug_provision_verifies_broker_status_before_success(
     cli, monkeypatch, capsys
 ):
     monkeypatch.setenv("ROCKIELAB_TENANT_ID", "t-demo")
     monkeypatch.setenv("ROCKIELAB_TENANT_TOKEN", "service-token")
-    calls: list[tuple[str, str, dict | None]] = []
+    monkeypatch.setenv("ROCKIELAB_ADMIN_TOKEN", "admin-secret")
+    calls: list[tuple[str, str, dict | None, dict | None]] = []
 
-    def fake_http(method: str, path: str, body=None):
-        calls.append((method, path, body))
+    def fake_http(method: str, path: str, body=None, extra_headers=None):
+        # Post-#1123 _http() accepts an extra_headers kwarg (admin-debug
+        # threads X-Admin-Token through it); the provision call passes it
+        # explicitly, so the stub must accept it.
+        calls.append((method, path, body, extra_headers))
         if method == "POST" and path == "/api/gpu/provision":
             return {
                 "pod_id": "cfom41v9yy9ze7",
@@ -183,7 +253,12 @@ def test_provision_verifies_broker_status_before_success(
 
     monkeypatch.setattr(cli, "_http", fake_http)
 
-    rc = cli.main(["provision", "--gpu", "A40_48GB", "--hours", "0.25"])
+    rc = cli.main(
+        [
+            "provision", "--gpu", "A40_48GB", "--hours", "0.25",
+            "--admin-debug", "--provider", "runpod",
+        ]
+    )
 
     assert rc == 0
     assert calls[0][0:2] == ("POST", "/api/gpu/provision")
@@ -191,19 +266,27 @@ def test_provision_verifies_broker_status_before_success(
         "GET",
         "/api/gpu/pods/cfom41v9yy9ze7/status?provider=runpod",
     )
+    # Both hops thread the admin header (X-Admin-Token) on the admin-debug
+    # path — falsifies a regression that dropped admin auth on the re-verify.
+    assert calls[0][3] == {"X-Admin-Token": "admin-secret"}
+    assert calls[1][3] == {"X-Admin-Token": "admin-secret"}
     payload = json.loads(capsys.readouterr().out)
     assert payload["pod_id"] == "cfom41v9yy9ze7"
     assert payload["tenant_id"] == "t-demo"
     assert payload["ownership_check_status"] == "VERIFIED"
+    assert payload["broker_status"]["state"] == "RUNNING"
 
 
-def test_provision_reports_unverified_when_status_says_pod_not_owned(
+def test_admin_debug_provision_reports_unverified_when_pod_not_owned(
     cli, monkeypatch, capsys
 ):
     monkeypatch.setenv("ROCKIELAB_TENANT_ID", "t-99562d476fef")
     monkeypatch.setenv("ROCKIELAB_TENANT_TOKEN", "service-token")
+    monkeypatch.setenv("ROCKIELAB_ADMIN_TOKEN", "admin-secret")
 
-    def fake_http(method: str, path: str, body=None):
+    def fake_http(method: str, path: str, body=None, extra_headers=None):
+        # Accept the post-#1123 extra_headers kwarg (see the sibling
+        # provision test for the rationale).
         if method == "POST" and path == "/api/gpu/provision":
             return {
                 "pod_id": "cfom41v9yy9ze7",
@@ -226,7 +309,12 @@ def test_provision_reports_unverified_when_status_says_pod_not_owned(
 
     monkeypatch.setattr(cli, "_http", fake_http)
 
-    rc = cli.main(["provision", "--gpu", "A40_48GB", "--hours", "0.25"])
+    rc = cli.main(
+        [
+            "provision", "--gpu", "A40_48GB", "--hours", "0.25",
+            "--admin-debug", "--provider", "runpod",
+        ]
+    )
 
     assert rc == 3
     payload = json.loads(capsys.readouterr().out)
@@ -238,3 +326,49 @@ def test_provision_reports_unverified_when_status_says_pod_not_owned(
     assert payload["tenant_id"] == "t-99562d476fef"
     assert payload["ownership_check_status"] == "FAILED"
     assert payload["ownership_check_error"]["code"] == "pod_not_owned"
+
+
+def test_tenant_provision_emits_broker_response_without_status_hop(
+    cli, monkeypatch, capsys
+):
+    # The deidentified default path (no --admin-debug, no --provider) must
+    # NOT make the second provider-keyed status GET and must NOT inject the
+    # client-side tenant_id / ownership_check_status fields — the broker's
+    # budgeted S3 response is emitted verbatim and the call returns 0.
+    # This is the load-bearing S7 #1123 behavior: a second hop here would
+    # both fail (no provider on the deidentified response) and leak.
+    monkeypatch.setenv("ROCKIELAB_TENANT_ID", "t-demo")
+    monkeypatch.setenv("ROCKIELAB_TENANT_TOKEN", "service-token")
+    calls: list[tuple[str, str, dict | None, dict | None]] = []
+
+    def fake_http(method: str, path: str, body=None, extra_headers=None):
+        calls.append((method, path, body, extra_headers))
+        if method == "POST" and path == "/api/gpu/provision":
+            return {
+                "pod_id": "cfom41v9yy9ze7",
+                "gpu_type": "A40_48GB",
+                "status": "RUNNING",
+                "estimated_cost_cents": 14,
+                "ownership_check_status": "VERIFIED",
+                "dry_run": False,
+            }
+        # A status GET here is a regression — the tenant path must not hop.
+        raise AssertionError(("unexpected call", method, path))
+
+    monkeypatch.setattr(cli, "_http", fake_http)
+
+    rc = cli.main(["provision", "--gpu", "A40_48GB", "--hours", "0.25"])
+
+    assert rc == 0
+    # Exactly one HTTP call: the provision POST, with no admin header.
+    assert len(calls) == 1
+    assert calls[0][0:2] == ("POST", "/api/gpu/provision")
+    assert calls[0][3] is None
+    payload = json.loads(capsys.readouterr().out)
+    # The broker response is passed through verbatim — no client-injected
+    # tenant_id / broker_status keys, and provider is never present.
+    assert payload["pod_id"] == "cfom41v9yy9ze7"
+    assert payload["ownership_check_status"] == "VERIFIED"
+    assert "tenant_id" not in payload
+    assert "broker_status" not in payload
+    assert "provider" not in payload
