@@ -58,6 +58,12 @@ Tenant identity is sent separately as ``X-Tenant-Id``. Resolution order:
 The optional admin token (``--admin-debug`` only) resolves from
 ``ROCKIELAB_ADMIN_TOKEN`` and is sent as ``X-Admin-Token``.
 
+The optional operator attestation header (``X-Operator-Tenant-Id``,
+#1218) resolves from ``ROCKIELAB_OPERATOR_TENANT_ID`` and is sent on
+every API call when set. Empty string = no attestation. The API
+trusts the header only after a same-user bind passes against the
+``tenant`` table.
+
 Same ladder for the API base URL:
 
   ROCKIELAB_API_BASE env → ``~/.rockie/config.json`` key ``api_base`` →
@@ -209,6 +215,12 @@ def _build_request(
         "X-Tenant-Token": _get_token(),
         "X-Tenant-Id": _get_tenant_id(),
     }
+    # #1218 — operator attestation. Always sent when configured; the
+    # API trusts it only after the same-user bind passes. Empty
+    # string means "no attestation" (legacy path, no behavior change).
+    op_tid = os.environ.get("ROCKIELAB_OPERATOR_TENANT_ID", "").strip()
+    if op_tid:
+        headers["X-Operator-Tenant-Id"] = op_tid
     if extra_headers:
         headers.update(extra_headers)
     data: Optional[bytes] = None
