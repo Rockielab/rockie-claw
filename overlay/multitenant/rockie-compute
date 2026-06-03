@@ -22,6 +22,8 @@ Reads two env vars set by the runtime entrypoint:
   ROCKIELAB_TENANT_TOKEN    — passed as X-Tenant-Token for auth
   ROCKIELAB_TENANT_DEV_TOKEN — compatibility alias for the same auth token
   ROCKIELAB_TENANT_ID       — passed as X-Tenant-Id for tenant scope
+  ROCKIELAB_OPERATOR_TENANT_ID — optional; #1218 operator attestation,
+                                 passed as X-Operator-Tenant-Id when set
 
 Exit codes mirror rockie-gpu:
   0  success
@@ -51,6 +53,7 @@ TENANT_TOKEN = (
     or ""
 ).strip()
 TENANT_ID = os.environ.get("ROCKIELAB_TENANT_ID", "").strip()
+OPERATOR_TENANT_ID = os.environ.get("ROCKIELAB_OPERATOR_TENANT_ID", "").strip()
 
 
 class CLIError(Exception):
@@ -73,6 +76,10 @@ def _build_request(
     headers = {"Accept": "application/json"}
     headers["X-Tenant-Token"] = TENANT_TOKEN
     headers["X-Tenant-Id"] = TENANT_ID
+    # #1218 — operator attestation. Always sent when configured; the
+    # API trusts it only after the same-user bind passes.
+    if OPERATOR_TENANT_ID:
+        headers["X-Operator-Tenant-Id"] = OPERATOR_TENANT_ID
     data: Optional[bytes] = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")

@@ -15,6 +15,9 @@
  *   ROCKIELAB_TENANT_TOKEN      (service/dev auth token, preferred)
  *   ROCKIELAB_TENANT_DEV_TOKEN  (compatibility alias for same auth token)
  *   ROCKIELAB_TENANT_ID         (tenant identity)
+ *   ROCKIELAB_OPERATOR_TENANT_ID (optional; #1218 operator attestation
+ *                                 — injected when this runtime is the
+ *                                 broker-child of a different SSO tenant)
  *
  * Registered into ~/.claude/mcp.json + ~/.codex/mcp.json at image
  * build time (see Dockerfile.multitenant + assemble-skills.sh).
@@ -29,6 +32,12 @@ const API_PASSWORD = process.env.ROCKIELAB_API_PASSWORD || process.env.OPEN_NOTE
 const TENANT_TOKEN =
   process.env.ROCKIELAB_TENANT_TOKEN || process.env.ROCKIELAB_TENANT_DEV_TOKEN || "";
 const TENANT_ID = process.env.ROCKIELAB_TENANT_ID || "";
+// #1218 — optional operator attestation. When the broker-child runtime
+// talks to the API about a resource owned by the customer's SSO tenant,
+// the broker-side process exports this so every outbound request can
+// say "I'm running as tenant <TENANT_ID> but acting on behalf of
+// tenant <OPERATOR_TENANT_ID>". Empty string means no attestation.
+const OPERATOR_TENANT_ID = process.env.ROCKIELAB_OPERATOR_TENANT_ID || "";
 
 // Tool catalog. Keep in lockstep with
 // platform-context/api/agent_tools/schemas.py. A parity test in
@@ -569,6 +578,9 @@ function authHeaders() {
   if (API_PASSWORD) h["Authorization"] = `Bearer ${API_PASSWORD}`;
   if (TENANT_TOKEN) h["X-Tenant-Token"] = TENANT_TOKEN;
   if (TENANT_ID) h["X-Tenant-Id"] = TENANT_ID;
+  // #1218 — operator attestation header. Always sent when configured;
+  // the API trusts it only after the same-user bind passes.
+  if (OPERATOR_TENANT_ID) h["X-Operator-Tenant-Id"] = OPERATOR_TENANT_ID;
   return h;
 }
 
