@@ -161,6 +161,29 @@ const STATIC_TOOLS = [
     },
   },
   {
+    name: "visualize_inference_result",
+    description:
+      "Render an inference endpoint smoke-call result as a modality-aware lab Note. Use after calling inference_<load_id>; pass explicit notebook_id plus bounded response_body and output_assets.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        notebook_id: { type: "string" },
+        load_id: { type: "string", minLength: 1 },
+        modality: { type: "string", minLength: 1 },
+        response_body: { type: "object" },
+        request_body: { type: "object" },
+        input_assets: { type: "array", items: { type: "object" } },
+        output_assets: { type: "array", items: { type: "object" } },
+        title: { type: "string" },
+        source_ids: { type: "array", items: { type: "string" } },
+        chat_session_id: { type: "string" },
+        chat_turn_id: { type: "string" },
+      },
+      required: ["notebook_id", "load_id", "modality", "response_body"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "insight_list",
     description: "List insights derived from a source.",
     inputSchema: {
