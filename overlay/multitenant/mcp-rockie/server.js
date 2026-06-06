@@ -38,6 +38,8 @@ const TENANT_ID = process.env.ROCKIELAB_TENANT_ID || "";
 // say "I'm running as tenant <TENANT_ID> but acting on behalf of
 // tenant <OPERATOR_TENANT_ID>". Empty string means no attestation.
 const OPERATOR_TENANT_ID = process.env.ROCKIELAB_OPERATOR_TENANT_ID || "";
+const BROKER_PORT = process.env.BROKER_PORT || "7681";
+const MCP_TEST_MODE = process.env.ROCKIE_MCP_TEST_MODE === "1";
 
 // Tool catalog. Keep in lockstep with
 // platform-context/api/agent_tools/schemas.py. A parity test in
@@ -596,6 +598,22 @@ const STATIC_TOOLS = [
   },
 ];
 
+const LOCAL_TOOLS = [
+  {
+    name: "materialize_secret",
+    description:
+      "Materialize a saved tenant ssh_key secret to a local broker-managed file. Returns only name, category, path, and mode; use the returned path with ssh -i.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", minLength: 1 },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+  },
+];
+
 function authHeaders() {
   const h = { "Content-Type": "application/json" };
   if (API_PASSWORD) h["Authorization"] = `Bearer ${API_PASSWORD}`;
@@ -610,7 +628,18 @@ function authHeaders() {
 // #425: live catalog = static ⊎ this tenant's active inference_{job_id}
 // tools (synthesized server-side from the inference_endpoint table).
 // Mutated by refreshCatalog(); read by ListTools + the CallTool guard.
-let liveCatalog = STATIC_TOOLS;
+let liveCatalog = mergeLocalTools(STATIC_TOOLS);
+
+function mergeLocalTools(tools) {
+  const merged = new Map();
+  for (const tool of tools || []) {
+    if (tool?.name) merged.set(tool.name, tool);
+  }
+  for (const tool of LOCAL_TOOLS) {
+    merged.set(tool.name, tool);
+  }
+  return [...merged.values()];
+}
 
 function inferenceNames(catalog) {
   return new Set(catalog.filter((t) => t.name.startsWith("inference_")).map((t) => t.name));
@@ -655,7 +684,7 @@ async function refreshCatalog() {
   if (!next.length) return;
 
   const prevInference = inferenceNames(liveCatalog);
-  liveCatalog = next;
+  liveCatalog = mergeLocalTools(next);
   const nextInference = inferenceNames(liveCatalog);
 
   // Send tools/list_changed when the inference_* set drifts so clients
@@ -708,6 +737,46 @@ async function callTool(name, args) {
   }
 }
 
+async function callMaterializeSecret(args) {
+  const name = args?.name;
+  if (typeof name !== "string" || !name.trim()) {
+    const err = new Error("materialize_secret requires a non-empty name");
+    err.code = "invalid_secret_name";
+    throw err;
+  }
+
+  const url = `http://127.0.0.1:${BROKER_PORT}/materialize-secret`;
+  let r;
+  try {
+    r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+  } catch (e) {
+    const err = new Error(`local broker unavailable: ${e?.message || e}`);
+    err.code = "broker_unavailable";
+    throw err;
+  }
+
+  const text = await r.text();
+  let detail;
+  try {
+    detail = JSON.parse(text);
+  } catch {
+    detail = null;
+  }
+  if (!r.ok) {
+    const err = new Error(
+      detail?.error?.message || `materialize_secret broker call failed with ${r.status}`,
+    );
+    err.status = r.status;
+    err.code = detail?.error?.code || "materialize_secret_failed";
+    throw err;
+  }
+  return detail;
+}
+
 const server = new Server(
   { name: "mcp-rockie", version: "0.2.0" },
   { capabilities: { tools: {} } },
@@ -715,8 +784,36 @@ const server = new Server(
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: liveCatalog }));
 
-server.setRequestHandler(CallToolRequestSchema, async (req) => {
+async function handleCallToolRequest(req) {
   const { name, arguments: args = {} } = req.params;
+  if (name === "materialize_secret") {
+    try {
+      const result = await callMaterializeSecret(args);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              error: {
+                code: err?.code || "materialize_secret_failed",
+                message: err?.message || String(err),
+              },
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
   // Quick local check so unknown-tool errors don't make a round-trip.
   // Uses the live catalog (#425) so dynamic inference_{job_id} tools
   // are accepted; static-only filtering would block every inference call.
@@ -789,20 +886,33 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       isError: true,
     };
   }
-});
+}
+
+server.setRequestHandler(CallToolRequestSchema, handleCallToolRequest);
 
 // #425: prime the live catalog before accepting traffic + poll every
 // 30s so dynamic inference_{job_id} tools appear / disappear without
 // a runtime restart. Wrapped in try/catch — a polling failure must
 // never crash the MCP server.
-await refreshCatalog().catch((e) =>
-  console.error(`mcp-rockie: initial refresh failed: ${e?.message || e}`),
-);
-setInterval(() => {
-  refreshCatalog().catch((e) =>
-    console.error(`mcp-rockie: refresh tick failed: ${e?.message || e}`),
-  );
-}, 30_000);
+export function __rockieMcpTestHooks() {
+  return {
+    callMaterializeSecret,
+    handleCallToolRequest,
+    refreshCatalog,
+    listTools: () => liveCatalog,
+  };
+}
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+if (!MCP_TEST_MODE) {
+  await refreshCatalog().catch((e) =>
+    console.error(`mcp-rockie: initial refresh failed: ${e?.message || e}`),
+  );
+  setInterval(() => {
+    refreshCatalog().catch((e) =>
+      console.error(`mcp-rockie: refresh tick failed: ${e?.message || e}`),
+    );
+  }, 30_000);
+
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}

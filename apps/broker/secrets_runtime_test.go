@@ -1,15 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 type stubSecretsClient struct {
-	metadata map[string]string
-	resolved resolvedSecretSet
+	metadata      map[string]string
+	resolved      resolvedSecretSet
+	resolveTenant string
+	resolveNames  []string
+	resolveTool   string
 }
 
 func (s stubSecretsClient) CandidateMetadata(_ context.Context, _ string, names []string) (map[string]string, error) {
@@ -22,7 +32,10 @@ func (s stubSecretsClient) CandidateMetadata(_ context.Context, _ string, names 
 	return out, nil
 }
 
-func (s stubSecretsClient) Resolve(_ context.Context, _ string, _ []string, _ string) (resolvedSecretSet, error) {
+func (s *stubSecretsClient) Resolve(_ context.Context, tenant string, names []string, tool string) (resolvedSecretSet, error) {
+	s.resolveTenant = tenant
+	s.resolveNames = append([]string{}, names...)
+	s.resolveTool = tool
 	return s.resolved, nil
 }
 
@@ -71,7 +84,7 @@ func TestParseExactEchoHeadCommand(t *testing.T) {
 
 func TestSecretAwareSpawnAllowsUnknownHomePath(t *testing.T) {
 	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
-	withStubSecretsClient(t, stubSecretsClient{metadata: map[string]string{}})
+	withStubSecretsClient(t, &stubSecretsClient{metadata: map[string]string{}})
 	_, handled, err := executeSecretAwareSpawnCommand(context.Background(), "echo $HOME && echo $PATH")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -84,7 +97,7 @@ func TestSecretAwareSpawnAllowsUnknownHomePath(t *testing.T) {
 func TestSecretAwareSpawnExactFormReturnsOnlyMarker(t *testing.T) {
 	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
 	secretValue := "CANARY_SECRET_VALUE_abcdef"
-	withStubSecretsClient(t, stubSecretsClient{
+	withStubSecretsClient(t, &stubSecretsClient{
 		metadata: map[string]string{"DEPLOY_KEY": "ssh_key"},
 		resolved: resolvedSecretSet{
 			Values:     map[string]string{"DEPLOY_KEY": secretValue},
@@ -108,7 +121,7 @@ func TestSecretAwareSpawnExactFormReturnsOnlyMarker(t *testing.T) {
 
 func TestSecretAwareSpawnLeavesNonExactKnownSecretUseForEnvInjection(t *testing.T) {
 	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
-	withStubSecretsClient(t, stubSecretsClient{
+	withStubSecretsClient(t, &stubSecretsClient{
 		metadata: map[string]string{"DEPLOY_KEY": "ssh_key"},
 	})
 	_, handled, err := executeSecretAwareSpawnCommand(context.Background(), "printf %s $DEPLOY_KEY")
@@ -120,7 +133,7 @@ func TestSecretAwareSpawnLeavesNonExactKnownSecretUseForEnvInjection(t *testing.
 func TestResolveSecretEnvForSpawnCommandMaterializesKnownRefs(t *testing.T) {
 	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
 	secretValue := "CANARY_SECRET_VALUE_abcdef"
-	withStubSecretsClient(t, stubSecretsClient{
+	withStubSecretsClient(t, &stubSecretsClient{
 		metadata: map[string]string{"DEPLOY_KEY": "ssh_key"},
 		resolved: resolvedSecretSet{
 			Values:     map[string]string{"DEPLOY_KEY": secretValue},
@@ -330,7 +343,7 @@ func TestIsEnvNameAllowedForChild(t *testing.T) {
 
 func TestMetadataCacheIsTenantScoped(t *testing.T) {
 	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-a")
-	withStubSecretsClient(t, stubSecretsClient{metadata: map[string]string{"DEPLOY_KEY": "ssh_key"}})
+	withStubSecretsClient(t, &stubSecretsClient{metadata: map[string]string{"DEPLOY_KEY": "ssh_key"}})
 	got, err := cachedCandidateMetadata(context.Background(), "tenant-a", []string{"DEPLOY_KEY"})
 	if err != nil || got["DEPLOY_KEY"] != "ssh_key" {
 		t.Fatalf("unexpected metadata: got=%v err=%v", got, err)
@@ -345,5 +358,268 @@ func TestMetadataCacheIsTenantScoped(t *testing.T) {
 	got, err = cachedCandidateMetadata(context.Background(), "tenant-b", []string{"DEPLOY_KEY"})
 	if err != nil || got["DEPLOY_KEY"] != "token" {
 		t.Fatalf("tenant-scoped cache lookup failed: got=%v err=%v", got, err)
+	}
+}
+
+func TestMaterializeSecretWritesSSHKeyWithSafeMetadataOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
+	secretValue := "CANARY_SECRET_VALUE_abcdef"
+	client := &stubSecretsClient{
+		metadata: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		resolved: resolvedSecretSet{
+			Values:     map[string]string{"DEPLOY_KEY": secretValue},
+			Categories: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		},
+	}
+	withStubSecretsClient(t, client)
+
+	resp, err := materializeSecret(context.Background(), "DEPLOY_KEY")
+	if err != nil {
+		t.Fatalf("materializeSecret failed: %v", err)
+	}
+	if client.resolveTenant != "tenant-test" || client.resolveTool != "materialize_secret" {
+		t.Fatalf("unexpected resolve call tenant=%q tool=%q", client.resolveTenant, client.resolveTool)
+	}
+	if len(client.resolveNames) != 1 || client.resolveNames[0] != "DEPLOY_KEY" {
+		t.Fatalf("unexpected resolve names: %v", client.resolveNames)
+	}
+	wantPath := filepath.Join(home, ".ssh", "rockie-secrets", "deploy_key-c50c61b0ec3c")
+	if resp != (materializeSecretResponse{Name: "DEPLOY_KEY", Category: "ssh_key", Path: wantPath, Mode: "0600"}) {
+		t.Fatalf("unexpected materialize response: %+v", resp)
+	}
+	body, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("secret file missing: %v", err)
+	}
+	if string(body) != secretValue {
+		t.Fatal("secret file content mismatch")
+	}
+	sshInfo, err := os.Stat(filepath.Join(home, ".ssh"))
+	if err != nil {
+		t.Fatalf("ssh dir missing: %v", err)
+	}
+	if sshInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("ssh dir mode = %o, want 0700", sshInfo.Mode().Perm())
+	}
+	secretsInfo, err := os.Stat(filepath.Join(home, ".ssh", "rockie-secrets"))
+	if err != nil {
+		t.Fatalf("rockie secrets dir missing: %v", err)
+	}
+	if secretsInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("rockie secrets dir mode = %o, want 0700", secretsInfo.Mode().Perm())
+	}
+	fileInfo, err := os.Stat(wantPath)
+	if err != nil {
+		t.Fatalf("secret file stat failed: %v", err)
+	}
+	if fileInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("secret file mode = %o, want 0600", fileInfo.Mode().Perm())
+	}
+
+	encoded, _ := json.Marshal(resp)
+	if strings.Contains(string(encoded), secretValue) || strings.Contains(string(encoded), "abcdef") {
+		t.Fatalf("materialize response leaked secret-derived data: %s", encoded)
+	}
+}
+
+func TestMaterializeSecretUsesBrokerNamespaceForReservedSSHNames(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	reservedPath := filepath.Join(sshDir, "authorized_keys")
+	if err := os.WriteFile(reservedPath, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withStubSecretsClient(t, &stubSecretsClient{
+		metadata: map[string]string{"AUTHORIZED_KEYS": "ssh_key"},
+		resolved: resolvedSecretSet{
+			Values:     map[string]string{"AUTHORIZED_KEYS": "secret-value"},
+			Categories: map[string]string{"AUTHORIZED_KEYS": "ssh_key"},
+		},
+	})
+
+	resp, err := materializeSecret(context.Background(), "AUTHORIZED_KEYS")
+	if err != nil {
+		t.Fatalf("materializeSecret failed: %v", err)
+	}
+	if resp.Path != filepath.Join(home, ".ssh", "rockie-secrets", "authorized_keys-f805a504851e") {
+		t.Fatalf("unexpected path: %q", resp.Path)
+	}
+	body, err := os.ReadFile(reservedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "existing" {
+		t.Fatalf("reserved .ssh file was clobbered: %q", body)
+	}
+}
+
+func TestMaterializeSecretUsesHashSuffixAndOverwritesSameSecretPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
+	secretsDir := filepath.Join(home, ".ssh", "rockie-secrets")
+	if err := os.MkdirAll(secretsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(secretsDir, "deploy_key-c50c61b0ec3c")
+	if err := os.WriteFile(path, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withStubSecretsClient(t, &stubSecretsClient{
+		metadata: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		resolved: resolvedSecretSet{
+			Values:     map[string]string{"DEPLOY_KEY": "secret-value"},
+			Categories: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		},
+	})
+
+	resp, err := materializeSecret(context.Background(), "DEPLOY_KEY")
+	if err != nil {
+		t.Fatalf("materializeSecret failed: %v", err)
+	}
+	if resp.Path != path {
+		t.Fatalf("unexpected path: %q", resp.Path)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "secret-value" {
+		t.Fatalf("materialized path was not updated: %q", body)
+	}
+}
+
+func TestSanitizedSecretFilenameDisambiguatesCollisions(t *testing.T) {
+	if sanitizedSecretFilename("A") != "a-559aead08264" {
+		t.Fatalf("unexpected sanitized filename for A: %q", sanitizedSecretFilename("A"))
+	}
+	if sanitizedSecretFilename("A_") != "a-ada8d598e51a" {
+		t.Fatalf("unexpected sanitized filename for A_: %q", sanitizedSecretFilename("A_"))
+	}
+	if sanitizedSecretFilename("A") == sanitizedSecretFilename("A_") {
+		t.Fatal("sanitized filenames collided")
+	}
+}
+
+func TestMaterializeSecretRejectsNonSSHKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
+	client := &stubSecretsClient{
+		metadata: map[string]string{"API_TOKEN": "token"},
+		resolved: resolvedSecretSet{
+			Values:     map[string]string{"API_TOKEN": "secret-value"},
+			Categories: map[string]string{"API_TOKEN": "token"},
+		},
+	}
+	withStubSecretsClient(t, client)
+	if _, err := materializeSecret(context.Background(), "API_TOKEN"); err == nil {
+		t.Fatal("expected non-ssh_key materialization to fail")
+	}
+	if len(client.resolveNames) != 0 {
+		t.Fatalf("non-ssh_key materialization should not call resolve, got %v", client.resolveNames)
+	}
+}
+
+func TestMaterializeSecretRejectsBadNameAndMissingSecret(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
+	client := &stubSecretsClient{
+		resolved: resolvedSecretSet{
+			Values:     map[string]string{},
+			Categories: map[string]string{},
+			Missing:    []string{"DEPLOY_KEY"},
+		},
+	}
+	withStubSecretsClient(t, client)
+
+	if _, err := materializeSecret(context.Background(), "deploy_key"); err == nil {
+		t.Fatal("expected lowercase secret name to fail validation")
+	}
+	if len(client.resolveNames) != 0 {
+		t.Fatalf("bad name should not call resolve, got %v", client.resolveNames)
+	}
+	if _, err := materializeSecret(context.Background(), "DEPLOY_KEY"); !errors.Is(err, errMaterializeSecretMissing) {
+		t.Fatalf("expected missing sentinel, got %v", err)
+	}
+	if len(client.resolveNames) != 0 {
+		t.Fatalf("missing metadata should not call resolve, got %v", client.resolveNames)
+	}
+}
+
+func TestMaterializeSecretHandlerRequiresLoopbackAndPOST(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
+	withStubSecretsClient(t, &stubSecretsClient{
+		metadata: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		resolved: resolvedSecretSet{
+			Values:     map[string]string{"DEPLOY_KEY": "secret-value"},
+			Categories: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/materialize-secret", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rr := httptest.NewRecorder()
+	materializeSecretHandler(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET status = %d, want 405", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/materialize-secret", bytes.NewBufferString(`{"name":"DEPLOY_KEY"}`))
+	req.RemoteAddr = "203.0.113.10:12345"
+	rr = httptest.NewRecorder()
+	materializeSecretHandler(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("non-loopback status = %d, want 403", rr.Code)
+	}
+}
+
+func TestMaterializeSecretHandlerAcceptsLoopbackAndRejectsExtraFields(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-test")
+	withStubSecretsClient(t, &stubSecretsClient{
+		metadata: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		resolved: resolvedSecretSet{
+			Values:     map[string]string{"DEPLOY_KEY": "secret-value"},
+			Categories: map[string]string{"DEPLOY_KEY": "ssh_key"},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/materialize-secret", bytes.NewBufferString(`{"name":"DEPLOY_KEY","path":"/tmp/x"}`))
+	req.RemoteAddr = "[::1]:12345"
+	rr := httptest.NewRecorder()
+	materializeSecretHandler(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("extra field status = %d, want 400", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/materialize-secret", bytes.NewBufferString(`{"name":"DEPLOY_KEY"}`))
+	req.RemoteAddr = "127.0.0.1:12345"
+	rr = httptest.NewRecorder()
+	materializeSecretHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("loopback status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "secret-value") {
+		t.Fatalf("handler response leaked secret: %s", rr.Body.String())
+	}
+}
+
+func TestMaterializeSecretHandlerRequiresTenantID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	withStubSecretsClient(t, &stubSecretsClient{})
+	req := httptest.NewRequest(http.MethodPost, "/materialize-secret", bytes.NewBufferString(`{"name":"DEPLOY_KEY"}`))
+	req.RemoteAddr = "127.0.0.1:12345"
+	rr := httptest.NewRecorder()
+	materializeSecretHandler(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("missing tenant status = %d, want 500", rr.Code)
 	}
 }

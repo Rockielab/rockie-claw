@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -125,6 +126,15 @@ func requireTenantID(w http.ResponseWriter) bool {
 	jsonError(w, http.StatusInternalServerError, "tenant_id_unset",
 		"ROCKIELAB_TENANT_ID is required")
 	return false
+}
+
+func isLoopbackRemoteAddr(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // healthHandler returns 200 {"status":"ok"}.
@@ -495,6 +505,62 @@ func spawnHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type materializeSecretRequest struct {
+	Name string `json:"name"`
+}
+
+func materializeSecretHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+			"only POST is allowed on /materialize-secret")
+		return
+	}
+	if !isLoopbackRemoteAddr(r.RemoteAddr) {
+		jsonError(w, http.StatusForbidden, "loopback_required",
+			"/materialize-secret is only available from localhost")
+		return
+	}
+	if !requireTenantID(w) {
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var req materializeSecretRequest
+	if err := decoder.Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "bad_request",
+			"invalid JSON body")
+		return
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err != io.EOF {
+		jsonError(w, http.StatusBadRequest, "bad_request",
+			"invalid JSON body")
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		jsonError(w, http.StatusBadRequest, "invalid_secret_name",
+			"name is required")
+		return
+	}
+
+	resp, err := materializeSecret(r.Context(), req.Name)
+	if err != nil {
+		status := http.StatusBadRequest
+		code := "materialize_secret_rejected"
+		if errors.Is(err, errMaterializeSecretMissing) {
+			status = http.StatusNotFound
+			code = "secret_missing"
+		}
+		jsonError(w, status, code, err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+	log("materialize-secret: name=%s category=%s path=%s", resp.Name, resp.Category, resp.Path)
+}
+
 // chatRequest is the JSON body for POST /chat.
 type chatRequest struct {
 	Prompt  string     `json:"prompt"`
@@ -803,6 +869,7 @@ func run() error {
 	mux.HandleFunc("/healthz", healthHandler)
 	mux.HandleFunc("/ws", wsHandler)
 	mux.HandleFunc("/spawn", spawnHandler)
+	mux.HandleFunc("/materialize-secret", materializeSecretHandler)
 	mux.HandleFunc("/chat", chatHandler)
 	mux.HandleFunc("/chat-pty", chatPTYHandler)
 
