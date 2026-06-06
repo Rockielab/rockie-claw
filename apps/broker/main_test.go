@@ -283,7 +283,7 @@ func TestSpawnChildReceivesSafeTenantRuntimeEnv(t *testing.T) {
 func TestSpawnBashInjectsResolvedTenantSecretEnvAndRedactsOutput(t *testing.T) {
 	setBrokerTestEnv(t, "tt")
 	secretValue := "CANARY_SECRET_VALUE_abcdef"
-	withStubSecretsClient(t, stubSecretsClient{
+	withStubSecretsClient(t, &stubSecretsClient{
 		metadata: map[string]string{"DEPLOY_KEY": "ssh_key"},
 		resolved: resolvedSecretSet{
 			Values:     map[string]string{"DEPLOY_KEY": secretValue},
