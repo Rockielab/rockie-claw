@@ -494,7 +494,7 @@ func TestSecretListAndGetHandlersReturnMetadataOnlyWithoutResolve(t *testing.T) 
 	if err := json.Unmarshal(rec.Body.Bytes(), &getResp); err != nil {
 		t.Fatalf("bad JSON: %v / %s", err, rec.Body.String())
 	}
-	if getResp.Name != "DEPLOY_KEY" || getResp.Value != "<redacted>" || !getResp.Materializable {
+	if getResp.Name != "DEPLOY_KEY" || getResp.Redacted != "<redacted>" || !getResp.Materializable {
 		t.Fatalf("unexpected get response: %+v", getResp)
 	}
 	if strings.Contains(rec.Body.String(), secretValue) || strings.Contains(rec.Body.String(), "abcdef") {

@@ -117,8 +117,7 @@ test("secret_list and secret_get call local broker without auth headers or plain
         name: "DEPLOY_KEY",
         category: "ssh_key",
         description: "deploy key",
-        available: true,
-        value: "<redacted>",
+        redacted: "<redacted>",
         materializable: true,
       });
     }

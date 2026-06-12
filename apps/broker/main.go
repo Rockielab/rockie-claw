@@ -863,8 +863,7 @@ type secretGetResponse struct {
 	Description    *string `json:"description,omitempty"`
 	CreatedAt      *string `json:"created_at,omitempty"`
 	LastUsedAt     *string `json:"last_used_at,omitempty"`
-	Available      bool    `json:"available"`
-	Value          string  `json:"value"`
+	Redacted       string  `json:"redacted"`
 	Materializable bool    `json:"materializable"`
 }
 
@@ -958,8 +957,7 @@ func secretGetHandler(w http.ResponseWriter, r *http.Request) {
 			Description:    entry.Description,
 			CreatedAt:      entry.CreatedAt,
 			LastUsedAt:     entry.LastUsedAt,
-			Available:      true,
-			Value:          "<redacted>",
+			Redacted:       "<redacted>",
 			Materializable: entry.Category == "ssh_key",
 		}
 		w.Header().Set("Content-Type", "application/json")
