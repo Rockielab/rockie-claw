@@ -278,23 +278,107 @@ func finalizedDatasetByID(w http.ResponseWriter, r *http.Request) {
 	if !requireBrokerAuth(w, r) {
 		return
 	}
-	if r.Method != http.MethodGet {
-		jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed",
-			"only GET is allowed on /datasets/{dataset_id}")
-		return
-	}
 	id := strings.TrimPrefix(r.URL.Path, "/datasets/")
 	if strings.Contains(id, "/") {
+		if r.Method == http.MethodDelete {
+			writeDatasetDeleteResult(w, id, false)
+			return
+		}
 		jsonError(w, http.StatusNotFound, "dataset_not_found", "dataset not found")
 		return
 	}
-	meta, err := readDatasetMeta(id)
-	if err != nil {
-		jsonError(w, http.StatusNotFound, "dataset_not_found", "dataset not found")
-		return
+	switch r.Method {
+	case http.MethodGet:
+		meta, err := readDatasetMeta(id)
+		if err != nil {
+			jsonError(w, http.StatusNotFound, "dataset_not_found", "dataset not found")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(meta)
+	case http.MethodDelete:
+		deleted, err := deleteDatasetVersion(id)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "dataset_delete_failed", err.Error())
+			return
+		}
+		writeDatasetDeleteResult(w, id, deleted)
+	default:
+		jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+			"only GET or DELETE is allowed on /datasets/{dataset_id}")
+	}
+}
+
+func writeDatasetDeleteResult(w http.ResponseWriter, id string, deleted bool) {
+	status := "not_found"
+	if deleted {
+		status = "deleted"
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(meta)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"dataset_id": id,
+		"version":    "v1",
+		"deleted":    deleted,
+		"status":     status,
+	})
+}
+
+func deleteDatasetVersion(id string) (bool, error) {
+	if !validDatasetID(id) {
+		return false, nil
+	}
+	root := datasetRoot()
+	parentDir := filepath.Join(root, id)
+	versionDir := filepath.Join(parentDir, "v1")
+	_, statErr := os.Stat(versionDir)
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return false, statErr
+	}
+	existed := statErr == nil
+	if err := os.RemoveAll(versionDir); err != nil {
+		return false, err
+	}
+	if _, err := os.Stat(parentDir); errors.Is(err, os.ErrNotExist) {
+		return existed, syncDatasetRootIfPresent(root)
+	} else if err != nil {
+		return false, err
+	}
+	removeOrphanDatasetStagingDirs(parentDir)
+	if err := syncDir(parentDir); err != nil {
+		return false, err
+	}
+	_ = os.Remove(parentDir)
+	return existed, syncDatasetRootIfPresent(root)
+}
+
+func removeOrphanDatasetStagingDirs(parentDir string) {
+	entries, err := os.ReadDir(parentDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || !strings.HasPrefix(name, ".v1.") || !strings.HasSuffix(name, ".staging") {
+			continue
+		}
+		uploadID := strings.TrimSuffix(strings.TrimPrefix(name, ".v1."), ".staging")
+		if uploadID == "" {
+			continue
+		}
+		if _, err := os.Stat(uploadStatePath(uploadID)); err == nil {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(parentDir, name))
+	}
+}
+
+func syncDatasetRootIfPresent(root string) error {
+	if _, err := os.Stat(root); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return syncDir(root)
 }
 
 func headDatasetUpload(w http.ResponseWriter, id string) {

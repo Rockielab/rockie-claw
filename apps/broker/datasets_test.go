@@ -354,6 +354,143 @@ func TestDatasetListDetailAndLabIDFilter(t *testing.T) {
 	}
 }
 
+func TestDatasetDeleteRemovesFinalizedDatasetAndIsIdempotent(t *testing.T) {
+	home := setDatasetTestEnv(t)
+	mux := datasetMux()
+	datasetID, _ := uploadAndFinalizeDataset(t, mux, "delete.csv", "name\nsam\n")
+	orphanStagingDir := filepath.Join(home, "datasets", datasetID, ".v1.upl_11111111111111111111111111111111.staging")
+	if err := os.MkdirAll(orphanStagingDir, 0o700); err != nil {
+		t.Fatalf("create orphan staging dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(orphanStagingDir, "data.bin"), []byte("orphan staging bytes"), 0o600); err != nil {
+		t.Fatalf("write orphan staging data: %v", err)
+	}
+	liveUploadID := "upl_22222222222222222222222222222222"
+	liveStagingDir := filepath.Join(home, "datasets", datasetID, ".v1."+liveUploadID+".staging")
+	if err := os.MkdirAll(liveStagingDir, 0o700); err != nil {
+		t.Fatalf("create live staging dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(liveStagingDir, "data.bin"), []byte("pending upload bytes"), 0o600); err != nil {
+		t.Fatalf("write live staging data: %v", err)
+	}
+	if err := os.WriteFile(uploadStatePath(liveUploadID), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write live upload state: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/datasets/"+datasetID, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("delete body json: %v", err)
+	}
+	if body["dataset_id"] != datasetID || body["version"] != "v1" || body["deleted"] != true || body["status"] != "deleted" {
+		t.Fatalf("unexpected delete body: %#v", body)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/datasets/"+datasetID, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected deleted detail 404, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/datasets", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var listBody struct {
+		Datasets []map[string]any `json:"datasets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listBody); err != nil {
+		t.Fatalf("list body json: %v", err)
+	}
+	for _, item := range listBody.Datasets {
+		if item["dataset_id"] == datasetID {
+			t.Fatalf("deleted dataset still listed: %#v", listBody.Datasets)
+		}
+	}
+
+	versionDir := filepath.Join(home, "datasets", datasetID, "v1")
+	for _, name := range []string{"data.bin", "meta.json"} {
+		if _, err := os.Stat(filepath.Join(versionDir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s should be removed, err=%v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(orphanStagingDir, "data.bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan staging data should be removed, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(liveStagingDir, "data.bin")); err != nil {
+		t.Fatalf("live staging data should remain after delete: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/datasets/"+datasetID, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second delete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body = map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("second delete body json: %v", err)
+	}
+	if body["deleted"] != false || body["status"] != "not_found" {
+		t.Fatalf("unexpected idempotent delete body: %#v", body)
+	}
+}
+
+func TestDatasetDeleteRequiresAuthBeforeRemovingFiles(t *testing.T) {
+	home := setDatasetTestEnv(t)
+	mux := datasetMux()
+	datasetID, _ := uploadAndFinalizeDataset(t, mux, "keep.csv", "name\nsam\n")
+
+	req := httptest.NewRequest(http.MethodDelete, "/datasets/"+datasetID, nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated delete 401, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, "datasets", datasetID, "v1", "data.bin")); err != nil {
+		t.Fatalf("unauthenticated delete removed data: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "datasets", datasetID, "v1", "meta.json")); err != nil {
+		t.Fatalf("unauthenticated delete removed metadata: %v", err)
+	}
+}
+
+func TestDatasetDeleteInvalidIDReturnsNotFoundSuccess(t *testing.T) {
+	home := setDatasetTestEnv(t)
+	mux := datasetMux()
+	datasetID, _ := uploadAndFinalizeDataset(t, mux, "safe.csv", "name\nsam\n")
+
+	req := httptest.NewRequest(http.MethodDelete, "/datasets/not-a-dataset", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("invalid id delete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid id delete body json: %v", err)
+	}
+	if body["dataset_id"] != "not-a-dataset" || body["deleted"] != false || body["status"] != "not_found" {
+		t.Fatalf("unexpected invalid id delete body: %#v", body)
+	}
+	if _, err := os.Stat(filepath.Join(home, "datasets", datasetID, "v1", "data.bin")); err != nil {
+		t.Fatalf("invalid id delete touched existing dataset: %v", err)
+	}
+}
+
 func TestDatasetFinalizeRejectsHashMismatch(t *testing.T) {
 	setDatasetTestEnv(t)
 	mux := datasetMux()
