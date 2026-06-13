@@ -53,6 +53,13 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - uses: actions/checkout@v4
+        with:
+          repository: Rockielab/platform-context
+          path: platform-context
+          fetch-depth: 1
+          persist-credentials: false
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -62,3 +69,8 @@ jobs:
 
       - name: Run multitenant overlay tests
         run: python -m pytest -q overlay/multitenant/tests/
+
+      - name: Run mcp-rockie source tests
+        env:
+          PLATFORM_CONTEXT_SCHEMAS_PATH: platform-context/api/agent_tools/schemas.py
+        run: node --test overlay/multitenant/mcp-rockie/server.source.test.mjs
