@@ -6,12 +6,17 @@ Sibling of ``rockie-gpu``. Lives at
 ``/opt/rockie-compute/rockie-compute`` with a symlink at
 ``/usr/local/bin/rockie-compute`` in the multitenant runtime image.
 
-Targets the ``/api/compute/*`` REST surface:
+Targets the unified ``/api/jobs`` control surface for job inspection and
+the ``/api/compute/*`` REST surface for compute submission/target setup:
 
   target              — show configured target + setup status
   submit  --script F  — submit a script to the configured runner
-  status  HANDLE      — poll status
-  cancel  HANDLE      — cancel
+  ls                  — list recent jobs
+  status  HANDLE      — legacy compute-runner status
+  detail  HANDLE      — unified job detail
+  cancel  HANDLE      — legacy compute-runner cancel
+  stop    HANDLE      — unified job cancel/stop
+  balance             — show current credit balance
 
 Stdlib-only. JSON-lines output by default; ``--human`` flips to
 table/kv format for ad-hoc debugging.
@@ -19,9 +24,10 @@ table/kv format for ad-hoc debugging.
 Reads two env vars set by the runtime entrypoint:
 
   ROCKIELAB_API_BASE        — e.g. https://api.rockielab.com
-  ROCKIELAB_TENANT_TOKEN    — passed as X-Tenant-Token for auth
+  ROCKIELAB_TENANT_TOKEN    — service/dev token for X-Tenant-Token auth,
+                              or rl_pat_* for Authorization: Bearer auth
   ROCKIELAB_TENANT_DEV_TOKEN — compatibility alias for the same auth token
-  ROCKIELAB_TENANT_ID       — passed as X-Tenant-Id for tenant scope
+  ROCKIELAB_TENANT_ID       — passed as X-Tenant-Id for service/dev tokens
   ROCKIELAB_OPERATOR_TENANT_ID — optional; #1218 operator attestation,
                                  passed as X-Operator-Tenant-Id when set
 
@@ -55,6 +61,7 @@ TENANT_TOKEN = (
 ).strip()
 TENANT_ID = os.environ.get("ROCKIELAB_TENANT_ID", "").strip()
 OPERATOR_TENANT_ID = os.environ.get("ROCKIELAB_OPERATOR_TENANT_ID", "").strip()
+CLI_TOKEN_PREFIX = "rl_pat_"
 
 
 class CLIError(Exception):
@@ -72,14 +79,17 @@ def _build_request(
             "ROCKIELAB_TENANT_TOKEN or ROCKIELAB_TENANT_DEV_TOKEN is required",
             exit_code=2,
         )
-    if not TENANT_ID:
-        raise CLIError("ROCKIELAB_TENANT_ID is required", exit_code=2)
     headers = {
         "Accept": "application/json",
         "User-Agent": ROCKIE_RUNTIME_USER_AGENT,
     }
-    headers["X-Tenant-Token"] = TENANT_TOKEN
-    headers["X-Tenant-Id"] = TENANT_ID
+    if TENANT_TOKEN.startswith(CLI_TOKEN_PREFIX):
+        headers["Authorization"] = f"Bearer {TENANT_TOKEN}"
+    else:
+        if not TENANT_ID:
+            raise CLIError("ROCKIELAB_TENANT_ID is required", exit_code=2)
+        headers["X-Tenant-Token"] = TENANT_TOKEN
+        headers["X-Tenant-Id"] = TENANT_ID
     # #1218 — operator attestation. Always sent when configured; the
     # API trusts it only after the same-user bind passes.
     if OPERATOR_TENANT_ID:
@@ -171,8 +181,20 @@ def cmd_submit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ls(args: argparse.Namespace) -> int:
+    result = _http("GET", f"/api/jobs?limit={args.limit}")
+    _emit(result, human=args.human)
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     result = _http("GET", f"/api/compute/jobs/{args.handle}")
+    _emit(result, human=args.human)
+    return 0
+
+
+def cmd_detail(args: argparse.Namespace) -> int:
+    result = _http("GET", f"/api/jobs/{args.handle}")
     _emit(result, human=args.human)
     return 0
 
@@ -183,6 +205,21 @@ def cmd_cancel(args: argparse.Namespace) -> int:
         {"handle": args.handle, "state": "cancelled"},
         human=args.human,
     )
+    return 0
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    _http("POST", f"/api/jobs/{args.handle}/cancel")
+    _emit(
+        {"handle": args.handle, "state": "cancelled"},
+        human=args.human,
+    )
+    return 0
+
+
+def cmd_balance(args: argparse.Namespace) -> int:
+    result = _http("GET", "/api/jobs/credit-balance")
+    _emit(result, human=args.human)
     return 0
 
 
@@ -231,19 +268,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_submit.set_defaults(func=cmd_submit)
 
+    p_ls = sub.add_parser(
+        "ls",
+        aliases=["list"],
+        help="List recent jobs across GPU, inference, and compute runners.",
+    )
+    p_ls.add_argument("--limit", type=int, default=50)
+    p_ls.set_defaults(func=cmd_ls)
+
     p_status = sub.add_parser(
         "status",
-        help="Get a job's status + artifacts.",
+        help="Get legacy compute-runner status + artifacts.",
     )
     p_status.add_argument("handle")
     p_status.set_defaults(func=cmd_status)
 
+    p_detail = sub.add_parser(
+        "detail",
+        help="Get unified job detail across GPU, inference, and compute runners.",
+    )
+    p_detail.add_argument("handle")
+    p_detail.set_defaults(func=cmd_detail)
+
     p_cancel = sub.add_parser(
         "cancel",
-        help="Cancel a running job. Idempotent.",
+        help="Cancel a legacy compute-runner job. Idempotent.",
     )
     p_cancel.add_argument("handle")
     p_cancel.set_defaults(func=cmd_cancel)
+
+    p_stop = sub.add_parser(
+        "stop",
+        help="Stop a job/load through the unified jobs surface. Idempotent.",
+    )
+    p_stop.add_argument("handle")
+    p_stop.set_defaults(func=cmd_stop)
+
+    p_balance = sub.add_parser(
+        "balance",
+        aliases=["spent"],
+        help="Current credit balance for this tenant.",
+    )
+    p_balance.set_defaults(func=cmd_balance)
 
     return parser
 

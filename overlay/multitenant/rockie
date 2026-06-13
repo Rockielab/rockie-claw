@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+cmd="${1:-}"
+case "$cmd" in
+  compute)
+    shift
+    exec /usr/local/bin/rockie-compute "$@"
+    ;;
+  gpu)
+    shift
+    exec /usr/local/bin/rockie-gpu "$@"
+    ;;
+  ""|-h|--help|help)
+    printf '%s\n' "Usage: rockie <compute|gpu> [args...]"
+    exit 0
+    ;;
+  *)
+    printf '%s\n' "rockie: unknown command: $cmd" >&2
+    printf '%s\n' "Usage: rockie <compute|gpu> [args...]" >&2
+    exit 2
+    ;;
+esac

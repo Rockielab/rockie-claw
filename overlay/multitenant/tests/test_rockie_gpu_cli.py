@@ -146,6 +146,16 @@ def test_build_request_sends_auth_token_and_tenant_id(cli, monkeypatch):
     assert req.get_header("X-tenant-id") == "t-aaa"
 
 
+def test_build_request_uses_pat_bearer_without_tenant_id(cli, monkeypatch):
+    monkeypatch.setenv("ROCKIELAB_TENANT_TOKEN", "rl_pat_gpu_token")
+
+    req = cli._build_request("GET", "/api/gpu/market", None)
+
+    assert req.get_header("Authorization") == "Bearer rl_pat_gpu_token"
+    assert req.get_header("X-tenant-token") is None
+    assert req.get_header("X-tenant-id") is None
+
+
 def test_build_request_threads_extra_headers(cli, monkeypatch):
     # The extra_headers keyword (admin-debug X-Admin-Token path) must be
     # merged onto the request without clobbering the tenant headers.

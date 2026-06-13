@@ -402,6 +402,9 @@ COPY --chown=root:root overlay/multitenant/rockie-compute /opt/rockie-compute/ro
 RUN chmod 755 /opt/rockie-compute/rockie-compute && \
     ln -sf /opt/rockie-compute/rockie-compute /usr/local/bin/rockie-compute
 
+COPY --chown=root:root overlay/multitenant/rockie /usr/local/bin/rockie
+RUN chmod 755 /usr/local/bin/rockie
+
 # rockie-loop daemon (MVP step 9) — the continuous autoresearch loop
 # that makes the "Rockie never sleeps" pitch literally true. stdlib-
 # only Python, same shape as the rockie-gpu / rockie-compute CLIs.
