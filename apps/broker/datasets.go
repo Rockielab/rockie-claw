@@ -17,10 +17,15 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 const datasetSampleLimit = 64 * 1024
+
+// defaultDatasetFreeSpaceFloorBytes keeps dataset writes from filling the
+// tenant volume, which also hosts the runtime workspace (1 GiB).
+const defaultDatasetFreeSpaceFloorBytes = int64(1 << 30)
 
 var datasetUploadLocks sync.Map
 
@@ -46,6 +51,41 @@ func datasetRoot() string {
 
 func uploadRoot() string {
 	return filepath.Join(datasetRoot(), ".uploads")
+}
+
+func datasetFreeSpaceFloorBytes() int64 {
+	raw := strings.TrimSpace(os.Getenv("DATASET_FREE_SPACE_FLOOR_BYTES"))
+	if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n >= 0 {
+		return n
+	}
+	return defaultDatasetFreeSpaceFloorBytes
+}
+
+func datasetVolumeFreeBytes() (int64, error) {
+	root := datasetRoot()
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return 0, err
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(root, &st); err != nil {
+		return 0, err
+	}
+	return int64(st.Bavail) * int64(st.Bsize), nil
+}
+
+// requireDatasetFreeSpace rejects dataset writes once free space on the
+// dataset volume drops below the floor. The volume also hosts the tenant's
+// runtime workspace, so filling it bricks the runtime. Statfs failures fail
+// open: the per-tenant storage cap upstream still bounds total bytes.
+func requireDatasetFreeSpace(w http.ResponseWriter) bool {
+	floor := datasetFreeSpaceFloorBytes()
+	free, err := datasetVolumeFreeBytes()
+	if err != nil || free >= floor {
+		return true
+	}
+	jsonError(w, http.StatusInsufficientStorage, "volume_free_space_floor",
+		fmt.Sprintf("the runtime volume is nearly full (%d bytes free, floor %d bytes); delete datasets or free up workspace files before uploading", free, floor))
+	return false
 }
 
 func bearerOrQueryToken(r *http.Request) string {
@@ -119,6 +159,9 @@ func newDatasetUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !requireBrokerAuth(w, r) {
+		return
+	}
+	if !requireDatasetFreeSpace(w) {
 		return
 	}
 	length := int64(-1)
@@ -396,6 +439,9 @@ func headDatasetUpload(w http.ResponseWriter, id string) {
 }
 
 func patchDatasetUpload(w http.ResponseWriter, r *http.Request, id string) {
+	if !requireDatasetFreeSpace(w) {
+		return
+	}
 	lock := datasetUploadLock(id)
 	lock.Lock()
 	defer lock.Unlock()

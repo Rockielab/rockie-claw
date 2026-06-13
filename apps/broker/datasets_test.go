@@ -107,6 +107,67 @@ func TestDatasetUploadRequiresBrokerAuthAndTenantID(t *testing.T) {
 	}
 }
 
+func TestDatasetUploadFreeSpaceFloorAllowsWhenTrivialFloor(t *testing.T) {
+	setDatasetTestEnv(t)
+	t.Setenv("DATASET_FREE_SPACE_FLOOR_BYTES", "1")
+	mux := datasetMux()
+
+	uploadID, _ := createUpload(t, mux, "data.csv", 3)
+	req := httptest.NewRequest(http.MethodPatch, "/datasets/uploads/"+uploadID, strings.NewReader("abc"))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Upload-Offset", "0")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("patch under trivial floor status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDatasetUploadFreeSpaceFloorRejectsCreateAndPatch(t *testing.T) {
+	setDatasetTestEnv(t)
+	mux := datasetMux()
+	uploadID, _ := createUpload(t, mux, "data.csv", 3)
+
+	t.Setenv("DATASET_FREE_SPACE_FLOOR_BYTES", strconv.FormatInt(1<<60, 10))
+
+	req := httptest.NewRequest(http.MethodPost, "/datasets/uploads", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Upload-Length", "3")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInsufficientStorage {
+		t.Fatalf("create above floor status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	assertVolumeFloorError(t, rec.Body.Bytes())
+
+	req = httptest.NewRequest(http.MethodPatch, "/datasets/uploads/"+uploadID, strings.NewReader("abc"))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Upload-Offset", "0")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInsufficientStorage {
+		t.Fatalf("patch above floor status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	assertVolumeFloorError(t, rec.Body.Bytes())
+	if got, err := os.ReadFile(uploadDataPath(uploadID)); err == nil {
+		t.Fatalf("patch above floor must not write chunk bytes, found %q", got)
+	}
+}
+
+func assertVolumeFloorError(t *testing.T, body []byte) {
+	t.Helper()
+	var payload map[string]map[string]string
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("floor error body json: %v body=%s", err, body)
+	}
+	if payload["error"]["code"] != "volume_free_space_floor" {
+		t.Fatalf("floor error code=%q body=%s", payload["error"]["code"], body)
+	}
+	if !strings.Contains(payload["error"]["message"], "nearly full") {
+		t.Fatalf("floor error message=%q", payload["error"]["message"])
+	}
+}
+
 func TestDatasetUploadOffsetAndHead(t *testing.T) {
 	setDatasetTestEnv(t)
 	mux := datasetMux()
