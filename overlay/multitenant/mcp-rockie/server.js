@@ -187,6 +187,19 @@ const STATIC_TOOLS = [
     },
   },
   {
+    name: "stop_inference_load",
+    description:
+      "Stop a running or loaded inference load owned by this tenant. Use when the user asks to stop/tear down a specific inference load id; do not guess ids.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        load_id: { type: "string", minLength: 1 },
+      },
+      required: ["load_id"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "insight_list",
     description: "List insights derived from a source.",
     inputSchema: {

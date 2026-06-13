@@ -76,6 +76,17 @@ def test_rockie_compute_sends_operator_tenant_id_header_when_set():
     assert '"User-Agent": ROCKIE_RUNTIME_USER_AGENT' in src
 
 
+def test_rockie_wrapper_is_installed_in_runtime_image():
+    src = (Path(__file__).resolve().parents[3] / "Dockerfile.multitenant").read_text(
+        encoding="utf-8"
+    )
+
+    assert "overlay/multitenant/rockie /usr/local/bin/rockie" in src
+    wrapper = (OVERLAY / "rockie").read_text(encoding="utf-8")
+    assert "exec /usr/local/bin/rockie-compute" in wrapper
+    assert "exec /usr/local/bin/rockie-gpu" in wrapper
+
+
 def test_rockie_gpu_sends_operator_tenant_id_header_when_set():
     """rockie-gpu CLI reads ROCKIELAB_OPERATOR_TENANT_ID and injects
     it into request headers (#1218)."""
