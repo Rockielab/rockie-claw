@@ -1,7 +1,7 @@
 # overlay/
 
-Everything in this directory is what makes `platform-runtime` *"Pebble
-ML's OpenClaw"* rather than vanilla `openclaw/openclaw`.
+Everything in this directory is what makes `platform-runtime` _"Pebble
+ML's OpenClaw"_ rather than vanilla `openclaw/openclaw`.
 
 **Hard rule:** nothing outside `overlay/` is modified. Upstream sync —
 `git fetch upstream && git merge upstream/main` — must stay clean. Any
@@ -41,7 +41,7 @@ this file when provisioning a tenant; the runtime reads it on start.
 
 ```json
 {
-  "skills_repo": "saml212/platform-skills",
+  "skills_repo": "Rockielab/platform-skills",
   "branch": "main",
   "fetch_strategy": "managed-hooks-symlink"
 }
@@ -52,8 +52,8 @@ this file when provisioning a tenant; the runtime reads it on start.
 - `managed-hooks-symlink` — clone into `~/.openclaw/skills/`, then
   symlink each `hooks/handlers/rockie-*/` dir into `~/.openclaw/hooks/`
   (the managed-hook discovery dir).
-- `bundled` — *(future)* package as a hook-pack npm and `openclaw plugins
-  install` it. Not yet implemented.
+- `bundled` — _(future)_ package as a hook-pack npm and `openclaw plugins
+install` it. Not yet implemented.
 
 ## Tenant scripts
 

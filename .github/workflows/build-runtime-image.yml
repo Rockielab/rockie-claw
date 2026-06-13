@@ -4,18 +4,18 @@ name: build-runtime-image
 # Triggered on changes to anything that affects the image, and manually.
 #
 # Two jobs:
-#   1. build         — buildx + push to ghcr.io/saml212/rockielab-runtime-multitenant:{sha,latest}
+#   1. build         — buildx + push to ghcr.io/rockielab/rockielab-runtime-multitenant:{sha,latest}
 #   2. dispatch-deploy — optional cross-repo trigger of deploy-hetzner.yml
 #                        (skipped silently if PLATFORM_CONTEXT_DISPATCH_TOKEN
 #                        isn't set on this repo).
 #
 # Dockerfile.multitenant uses `COPY --from=skills` which expects a
-# named build-context. We vendor saml212/platform-skills (a private
+# named build-context. We vendor Rockielab/platform-skills (a private
 # sibling repo) into the runner before building.
 #
-# Required CI secrets (set in saml212/platform-runtime Actions secrets):
+# Required CI secrets (set in Rockielab/platform-runtime Actions secrets):
 #   - PLATFORM_SKILLS_READ_TOKEN  (fine-grained PAT with Contents:Read on
-#     saml212/platform-skills only. Required because platform-skills is
+#     Rockielab/platform-skills only. Required because platform-skills is
 #     private and the default GITHUB_TOKEN is scoped to this repo only.)
 #
 # GHCR push auth uses the workflow's auto-minted GITHUB_TOKEN (the
@@ -24,7 +24,7 @@ name: build-runtime-image
 #
 # Optional CI secrets:
 #   - PLATFORM_CONTEXT_DISPATCH_TOKEN  (PAT with `actions:write` on
-#     saml212/platform-context). Lets a successful build automatically
+#     Rockielab/platform-context). Lets a successful build automatically
 #     trigger the Hetzner deploy. Skip if you'd rather click the deploy
 #     manually after a build.
 
@@ -86,7 +86,7 @@ on:
         required: false
         type: string
   repository_dispatch:
-    # Fired by saml212/platform-skills when its `main` updates, so the
+    # Fired by Rockielab/platform-skills when its `main` updates, so the
     # baked-in skills overlay gets a fresh build. The dispatcher
     # workflow lives on platform-skills (TODO if it doesn't exist yet).
     types: [skills-updated]
@@ -105,7 +105,7 @@ jobs:
       contents: read
       packages: write
     env:
-      IMAGE: ghcr.io/saml212/rockielab-runtime-multitenant
+      IMAGE: ghcr.io/rockielab/rockielab-runtime-multitenant
       # Map the secret to env so we can `if:` on it (secrets context is
       # not available in step-level if expressions; env is).
       SKILLS_READ_TOKEN: ${{ secrets.PLATFORM_SKILLS_READ_TOKEN }}
@@ -114,8 +114,8 @@ jobs:
         if: env.SKILLS_READ_TOKEN == ''
         run: |
           echo "::error::PLATFORM_SKILLS_READ_TOKEN secret is not set on this repo."
-          echo "Generate a fine-grained PAT with Contents:Read on saml212/platform-skills,"
-          echo "then: gh secret set PLATFORM_SKILLS_READ_TOKEN --repo saml212/platform-runtime --body '<pat>'"
+          echo "Generate a fine-grained PAT with Contents:Read on Rockielab/platform-skills,"
+          echo "then: gh secret set PLATFORM_SKILLS_READ_TOKEN --repo Rockielab/platform-runtime --body '<pat>'"
           exit 1
 
       - uses: actions/checkout@v4
@@ -125,7 +125,7 @@ jobs:
       - name: Checkout platform-skills (vendored at build time)
         uses: actions/checkout@v4
         with:
-          repository: saml212/platform-skills
+          repository: Rockielab/platform-skills
           path: vendor/platform-skills
           token: ${{ secrets.PLATFORM_SKILLS_READ_TOKEN }}
           fetch-depth: 1
@@ -287,7 +287,7 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $DISPATCH_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/saml212/platform-context/actions/workflows/deploy-hetzner.yml/dispatches \
+            https://api.github.com/repos/Rockielab/platform-context/actions/workflows/deploy-hetzner.yml/dispatches \
             -d '{"ref":"main"}'
 
       - name: Note when skipped
@@ -295,7 +295,7 @@ jobs:
         run: |
           echo "## Cross-repo deploy NOT triggered" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "PLATFORM_CONTEXT_DISPATCH_TOKEN is not set on this repo, so the Hetzner deploy was not auto-triggered. Click 'Run workflow' manually on saml212/platform-context's deploy-hetzner.yml when ready." >> $GITHUB_STEP_SUMMARY
+          echo "PLATFORM_CONTEXT_DISPATCH_TOKEN is not set on this repo, so the Hetzner deploy was not auto-triggered. Click 'Run workflow' manually on Rockielab/platform-context's deploy-hetzner.yml when ready." >> $GITHUB_STEP_SUMMARY
 
   rollout-tenants:
     # Step 7 of #816: after the runtime image is pushed to GHCR, roll
@@ -323,7 +323,7 @@ jobs:
       API_URL: ${{ secrets.ROCKIELAB_API_URL }}
       ADMIN_TOKEN: ${{ secrets.ROCKIELAB_ADMIN_TOKEN }}
       FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      IMAGE_TAG: ghcr.io/saml212/rockielab-runtime-multitenant:${{ github.sha }}
+      IMAGE_TAG: ghcr.io/rockielab/rockielab-runtime-multitenant:${{ github.sha }}
       ROLLOUT_TENANT_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.rollout_tenant_id || '' }}
       ROLLOUT_CANARY_COUNT: ${{ github.event_name == 'workflow_dispatch' && inputs.rollout_canary_count || '' }}
       ROLLOUT_CANARY_WAIT_SEC: ${{ github.event_name == 'workflow_dispatch' && inputs.rollout_canary_wait_sec || '' }}
@@ -343,14 +343,14 @@ jobs:
           [ -z "$ADMIN_TOKEN" ] && missing="$missing ROCKIELAB_ADMIN_TOKEN"
           [ -z "$FLY_API_TOKEN" ] && missing="$missing FLY_API_TOKEN"
           if [ -n "$missing" ]; then
-            echo "::warning::Skipping cross-tenant rollout. Missing secrets on saml212/platform-runtime:$missing"
+            echo "::warning::Skipping cross-tenant rollout. Missing secrets on Rockielab/platform-runtime:$missing"
             echo "skipped=true" >> $GITHUB_OUTPUT
             {
               echo "## Cross-tenant rollout SKIPPED"
               echo ""
               echo "Required secrets missing:$missing"
               echo ""
-              echo "Set them with \`gh secret set <NAME> --repo saml212/platform-runtime --body '<value>'\`."
+              echo "Set them with \`gh secret set <NAME> --repo Rockielab/platform-runtime --body '<value>'\`."
               echo ""
               echo "ROCKIELAB_API_URL: full https url of the api host (e.g. \`https://api.rockielab.com\`)"
               echo "ROCKIELAB_ADMIN_TOKEN: sent as X-Admin-Token to the admin rollout route"

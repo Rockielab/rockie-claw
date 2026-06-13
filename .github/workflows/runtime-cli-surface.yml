@@ -35,7 +35,7 @@ jobs:
       packages: read
       pull-requests: read
     env:
-      IMAGE_REPOSITORY: ghcr.io/saml212/rockielab-runtime-multitenant
+      IMAGE_REPOSITORY: ghcr.io/rockielab/rockielab-runtime-multitenant
       PR_IMAGE: rockielab-runtime-multitenant:cli-surface-${{ github.sha }}
       BASELINE_DIR: .artifacts/cli-surface-baseline
       OUTPUT_DIR: .artifacts/cli-surface
@@ -69,7 +69,7 @@ jobs:
         if: env.SHOULD_BUILD_PR_IMAGE == 'true'
         uses: actions/checkout@v4
         with:
-          repository: saml212/platform-skills
+          repository: Rockielab/platform-skills
           path: vendor/platform-skills
           token: ${{ secrets.PLATFORM_SKILLS_READ_TOKEN }}
           fetch-depth: 1

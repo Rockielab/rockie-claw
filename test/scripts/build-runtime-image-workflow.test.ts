@@ -121,7 +121,7 @@ describe("build-runtime-image rollout workflow", () => {
     const job = rolloutJob();
     expect(job.env).toMatchObject({
       FLY_API_TOKEN: "${{ secrets.FLY_API_TOKEN }}",
-      IMAGE_TAG: "ghcr.io/saml212/rockielab-runtime-multitenant:${{ github.sha }}",
+      IMAGE_TAG: "ghcr.io/rockielab/rockielab-runtime-multitenant:${{ github.sha }}",
       ROLLOUT_ARTIFACT_DIR: ".artifacts/runtime-rollout",
       ROLLOUT_MAX_ATTEMPTS: "5",
       ROLLOUT_FALLBACK_AFTER_TRANSIENTS: "2",

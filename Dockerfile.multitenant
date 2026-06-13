@@ -207,7 +207,7 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages \
 # must not pull DeepPresenter/model-download/GPU dependencies.
 RUN python3 -m pip install --no-cache-dir --break-system-packages \
       'xlsxwriter==3.2.9' \
-      'rockie-pptagent @ git+https://github.com/saml212/platform-pptx-agent.git@c5200c33c8c36f30a817b36d2dff23e615e06b88'
+      'rockie-pptagent @ git+https://github.com/Rockielab/platform-pptx-agent.git@c5200c33c8c36f30a817b36d2dff23e615e06b88'
 
 # Verify both `hf` and the SDK resolved (cheap fail-fast at build time).
 RUN command -v hf && hf --version && \
