@@ -7,6 +7,7 @@ process.env.ROCKIELAB_API_BASE = "https://api.rockielab.test";
 process.env.ROCKIELAB_API_PASSWORD = "platform-password";
 process.env.ROCKIELAB_TENANT_TOKEN = "tenant-token";
 process.env.ROCKIELAB_TENANT_ID = "tenant-id";
+process.env.ROCKIELAB_OPERATOR_TENANT_ID = "operator-tenant-id";
 
 const serverSource = readFileSync(new URL("./server.js", import.meta.url), "utf8")
   .replace(
@@ -165,6 +166,39 @@ test("secret_get validates local arguments before calling broker", async () => {
   assert.equal(err.isError, true);
   assert.equal(JSON.parse(err.content[0].text).error.code, "invalid_secret_name");
   assert.equal(calls.length, 0);
+});
+
+test("stop_inference_load is listed and proxies without tenant ids in the body", async () => {
+  const hooks = __rockieMcpTestHooks();
+  const stopTool = hooks.listTools().find((tool) => tool.name === "stop_inference_load");
+  assert.ok(stopTool);
+  assert.deepEqual(stopTool.inputSchema, {
+    type: "object",
+    properties: { load_id: { type: "string", minLength: 1 } },
+    required: ["load_id"],
+    additionalProperties: false,
+  });
+
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url, init });
+    return response({ stopped: true });
+  };
+
+  const result = await hooks.handleCallToolRequest({
+    params: { name: "stop_inference_load", arguments: { load_id: "load-1" } },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(JSON.parse(result.content[0].text), { stopped: true });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://api.rockielab.test/api/agent-tools/stop_inference_load");
+  assert.equal(calls[0].init.method, "POST");
+  assert.equal(calls[0].init.headers.Authorization, "Bearer platform-password");
+  assert.equal(calls[0].init.headers["X-Tenant-Token"], "tenant-token");
+  assert.equal(calls[0].init.headers["X-Tenant-Id"], "tenant-id");
+  assert.equal(calls[0].init.headers["X-Operator-Tenant-Id"], "operator-tenant-id");
+  assert.deepEqual(JSON.parse(calls[0].init.body), { arguments: { load_id: "load-1" } });
 });
 
 test("local secret tools remain local after platform catalog refresh", async () => {
