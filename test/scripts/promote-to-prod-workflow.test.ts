@@ -19,6 +19,7 @@ describe("promote-to-prod workflow", () => {
     expect(job.env).toMatchObject({
       API_URL: "${{ secrets.ROCKIELAB_PROD_API_URL }}",
       ADMIN_TOKEN: "${{ secrets.ROCKIELAB_PROD_ADMIN_TOKEN }}",
+      IMAGE_SHA: "${{ inputs.image_sha }}",
       ROLLOUT_ENV: "prod",
     });
     expect(text).toContain("Verify prod catalog availability for dry-run");
