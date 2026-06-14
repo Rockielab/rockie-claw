@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
@@ -48,6 +49,15 @@ function workflowStep(job: WorkflowJob, stepName: string): WorkflowStep {
   expect(step, `expected workflow step ${stepName}`).toBeDefined();
   return step!;
 }
+
+function extractJqFilter(run: string): string {
+  const filters = [...run.matchAll(/--jq '([^']+)'/g)].map((match) => match[1]);
+  const filter = filters.find((candidate) => candidate.includes("$candidate_run_id"));
+  expect(filter, "expected workflow step to pass a candidate run id --jq filter").toBeDefined();
+  return filter!;
+}
+
+const jqAvailable = spawnSync("jq", ["--version"], { encoding: "utf8" }).status === 0;
 
 describe("build-runtime-image rollout workflow", () => {
   it("keeps broker-only edits out of the expensive OpenClaw/UI build copy", () => {
@@ -259,6 +269,9 @@ describe("build-runtime-image rollout workflow", () => {
     expect(sync.run).toContain("dry_run=false");
     expect(sync.run).toContain('request_id="runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-dev"');
     expect(sync.run).toContain("displayTitle == env.EXPECTED_TITLE");
+    expect(sync.run).toContain(".databaseId as $candidate_run_id");
+    expect(sync.run).toContain("index($candidate_run_id)");
+    expect(sync.run).not.toContain("index(.databaseId)");
     expect(sync.run).toContain('grep -Fx "$expected_title"');
     expect(sync.run).toContain("gh run watch");
 
@@ -269,6 +282,41 @@ describe("build-runtime-image rollout workflow", () => {
     expect(syncIndex).toBeGreaterThan(-1);
     expect(syncIndex).toBeLessThan(checkoutIndex);
   });
+
+  it.runIf(jqAvailable)(
+    "selects the newly dispatched platform-context sync run with the workflow jq filter",
+    () => {
+      const before = [27504377892, 27495605735];
+      const expectedTitle = "sync platform-skills dev abc runtime-1-1-dev";
+      const runs = [
+        { databaseId: 27504377892, displayTitle: expectedTitle },
+        { databaseId: 27512345678, displayTitle: expectedTitle },
+        { databaseId: 27599999999, displayTitle: "other" },
+      ];
+      const prod = readWorkflow().jobs?.["rollout-prod"];
+      expect(prod, "expected rollout-prod job").toBeDefined();
+      const syncFilters = [
+        workflowStep(rolloutJob(), "Sync dev catalog to bound platform-skills SHA").run!,
+        workflowStep(prod!, "Sync prod catalog to bound platform-skills SHA").run!,
+      ].map((run) => extractJqFilter(run));
+
+      for (const filter of syncFilters) {
+        const result = spawnSync("jq", ["-r", filter], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            BEFORE: JSON.stringify(before),
+            EXPECTED_TITLE: expectedTitle,
+          },
+          input: JSON.stringify(runs),
+        });
+
+        expect(result.stderr).toBe("");
+        expect(result.status).toBe(0);
+        expect(result.stdout.trim()).toBe("27512345678");
+      }
+    },
+  );
 
   it("does not let scoped manual rollout inputs trigger prod full-fleet", () => {
     const prod = readWorkflow().jobs?.["rollout-prod"];
@@ -306,6 +354,9 @@ describe("build-runtime-image rollout workflow", () => {
     const sync = prod!.steps![syncIndex].run ?? "";
     expect(sync).toContain('request_id="runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-prod"');
     expect(sync).toContain("displayTitle == env.EXPECTED_TITLE");
+    expect(sync).toContain(".databaseId as $candidate_run_id");
+    expect(sync).toContain("index($candidate_run_id)");
+    expect(sync).not.toContain("index(.databaseId)");
     expect(sync).toContain('grep -Fx "$expected_title"');
     expect(sync).toContain("dry_run=false");
   });
