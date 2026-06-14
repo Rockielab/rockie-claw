@@ -432,10 +432,6 @@ describe("message tool Telegram topic targets", () => {
     mockSendResult({ to: "telegram:-1001234567890:topic:42" });
 
     const call = await executeSend({
-      toolOptions: {
-        currentChannelProvider: "telegram",
-        currentChannelId: "telegram:-1001234567890:topic:42",
-      },
       action: {
         channel: "telegram",
         target: "-1001234567890:topic:42",
@@ -444,14 +440,10 @@ describe("message tool Telegram topic targets", () => {
       },
     });
 
-    expect(call?.params).toEqual(
-      expect.objectContaining({
-        channel: "telegram",
-        target: "-1001234567890:topic:42",
-        threadId: "42",
-        message: "topic hello",
-      }),
-    );
+    expect(call?.params?.channel).toBe("telegram");
+    expect(call?.params?.target).toBe("-1001234567890:topic:42");
+    expect(call?.params?.threadId).toBe("42");
+    expect(call?.params?.message).toBe("topic hello");
   });
 });
 
