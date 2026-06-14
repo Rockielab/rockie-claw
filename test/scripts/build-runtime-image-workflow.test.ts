@@ -144,6 +144,18 @@ describe("build-runtime-image rollout workflow", () => {
     }
     expect(run).not.toContain('echo "docker_server=$(docker version');
     expect(run).not.toContain('echo "buildx_version=$(docker buildx version)"');
+
+    const upload = workflowStep(
+      readWorkflow().jobs?.build ?? {},
+      "Upload runtime image platform proof",
+    );
+    expect(upload.if).toBe("always()");
+    expect(upload.uses).toBe("actions/upload-artifact@v4");
+    expect(upload.with).toMatchObject({
+      name: "runtime-image-platform-proof",
+      path: ".artifacts/runtime-image-platform/broker-platform-proof.txt",
+      "if-no-files-found": "ignore",
+    });
   });
 
   it("writes and uploads a rollout summary artifact with retry metadata", () => {

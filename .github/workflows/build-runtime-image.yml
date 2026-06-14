@@ -274,10 +274,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload runtime image platform proof
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: runtime-image-platform-proof
           path: .artifacts/runtime-image-platform/broker-platform-proof.txt
+          if-no-files-found: ignore
 
       - name: Summary
         run: |
