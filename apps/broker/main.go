@@ -174,6 +174,107 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
+const (
+	playgroundModalityTextGeneration = "text-generation"
+	playgroundModalityEmbedding      = "text-embedding"
+	playgroundModalityImage          = "image"
+)
+
+type playgroundUnavailableReason struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type playgroundModalityCapability struct {
+	Available         bool                         `json:"available"`
+	UnavailableReason *playgroundUnavailableReason `json:"unavailable_reason,omitempty"`
+}
+
+type playgroundCapabilitiesResponse struct {
+	Modalities map[string]playgroundModalityCapability `json:"modalities"`
+}
+
+type playgroundInferRequest struct {
+	RegistrySlug string `json:"registry_slug"`
+	Modality     string `json:"modality"`
+	Prompt       string `json:"prompt"`
+}
+
+func playgroundUnavailableCapability(message string) playgroundModalityCapability {
+	return playgroundModalityCapability{
+		Available: false,
+		UnavailableReason: &playgroundUnavailableReason{
+			Code:    "not_implemented",
+			Message: message,
+		},
+	}
+}
+
+func playgroundCapabilities() playgroundCapabilitiesResponse {
+	return playgroundCapabilitiesResponse{
+		Modalities: map[string]playgroundModalityCapability{
+			playgroundModalityTextGeneration: playgroundUnavailableCapability(
+				"Text generation inference is not implemented in the tenant broker. Configure a real text-generation backend before enabling this modality.",
+			),
+			playgroundModalityEmbedding: playgroundUnavailableCapability(
+				"Embedding inference is not implemented in the tenant broker. Configure a real embedding backend before enabling this modality.",
+			),
+			playgroundModalityImage: playgroundUnavailableCapability(
+				"Image inference is not implemented in the tenant broker. Configure a real image backend before enabling this modality.",
+			),
+		},
+	}
+}
+
+func playgroundCapabilitiesHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+			"only GET is allowed on /playground/capabilities")
+		return
+	}
+	if !requireBrokerRequest(w, r) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(playgroundCapabilities())
+}
+
+func playgroundInferHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+			"only POST is allowed on /playground/infer")
+		return
+	}
+	if !requireBrokerRequest(w, r) {
+		return
+	}
+
+	var req playgroundInferRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		jsonError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
+		return
+	}
+	req.RegistrySlug = strings.TrimSpace(req.RegistrySlug)
+	req.Modality = strings.TrimSpace(req.Modality)
+	if req.RegistrySlug == "" {
+		jsonError(w, http.StatusBadRequest, "missing_registry_slug", "registry_slug is required")
+		return
+	}
+	if req.Modality == "" {
+		jsonError(w, http.StatusBadRequest, "missing_modality", "modality is required")
+		return
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		jsonError(w, http.StatusBadRequest, "empty_prompt", "prompt is required")
+		return
+	}
+
+	msg := fmt.Sprintf("%s inference is unavailable in the tenant broker playground. Configure and route to a real %s backend before calling this modality.", req.Modality, req.Modality)
+	jsonError(w, http.StatusServiceUnavailable, "playground_inference_unavailable", msg)
+}
+
 type fsEntry struct {
 	Name  string `json:"name"`
 	Path  string `json:"path"`
@@ -1281,6 +1382,8 @@ func run() error {
 	mux.HandleFunc("/materialize-secret", materializeSecretHandler)
 	mux.HandleFunc("/secret-list", secretListHandler)
 	mux.HandleFunc("/secret-get", secretGetHandler)
+	mux.HandleFunc("/playground/capabilities", playgroundCapabilitiesHandler)
+	mux.HandleFunc("/playground/infer", playgroundInferHandler)
 	mux.HandleFunc("/chat", chatHandler)
 	mux.HandleFunc("/chat-pty", chatPTYHandler)
 	mux.HandleFunc("/datasets", finalizedDatasets)
