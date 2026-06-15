@@ -79,6 +79,50 @@ proxy can pipe an xterm.js session through to the user's browser.
   }
   ```
 
+- `GET /playground/capabilities`
+  Auth: same broker token, supplied either as `?token=` or as
+  `Authorization: Bearer <token>`. Returns modality support for the
+  tenant broker playground. All modalities are unavailable until a real
+  backend is added, and each carries a typed
+  `unavailable_reason`.
+  ```json
+  {
+    "modalities": {
+      "text-generation": {
+        "available": false,
+        "unavailable_reason": {
+          "code": "not_implemented",
+          "message": "Text generation inference is not implemented in the tenant broker. Configure a real text-generation backend before enabling this modality."
+        }
+      },
+      "text-embedding": {
+        "available": false,
+        "unavailable_reason": {
+          "code": "not_implemented",
+          "message": "Embedding inference is not implemented in the tenant broker. Configure a real embedding backend before enabling this modality."
+        }
+      },
+      "image": {
+        "available": false,
+        "unavailable_reason": {
+          "code": "not_implemented",
+          "message": "Image inference is not implemented in the tenant broker. Configure a real image backend before enabling this modality."
+        }
+      }
+    }
+  }
+  ```
+
+- `POST /playground/infer`
+  Auth: same broker token, supplied either as `?token=` or as
+  `Authorization: Bearer <token>`. Body:
+  ```json
+  { "registry_slug": "tiny-text", "modality": "text-generation", "prompt": "hello" }
+  ```
+  `text-generation`, `text-embedding`, and `image` return non-2xx JSON errors with code
+  `playground_inference_unavailable`. The broker does not execute
+  GPU, torch, or model-weight inference.
+
 ## Auth
 
 The broker reads its expected token from the env var

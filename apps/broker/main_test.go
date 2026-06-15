@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -157,6 +158,95 @@ func TestRuntimeFSRejectsBinaryAndLargeFiles(t *testing.T) {
 	runtimeFSFileHandler(rec, authedFSRequest(t, http.MethodGet, target))
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPlaygroundCapabilitiesRequiresToken(t *testing.T) {
+	setBrokerTestEnv(t, "tt")
+	req := httptest.NewRequest(http.MethodGet, "/playground/capabilities", nil)
+	rec := httptest.NewRecorder()
+	playgroundCapabilitiesHandler(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPlaygroundCapabilitiesShape(t *testing.T) {
+	setBrokerTestEnv(t, "tt")
+	req := httptest.NewRequest(http.MethodGet, "/playground/capabilities?token=tt", nil)
+	rec := httptest.NewRecorder()
+	playgroundCapabilitiesHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body playgroundCapabilitiesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode capabilities: %v body=%s", err, rec.Body.String())
+	}
+	for _, modality := range []string{playgroundModalityTextGeneration, playgroundModalityEmbedding, playgroundModalityImage} {
+		capability := body.Modalities[modality]
+		if capability.Available {
+			t.Fatalf("%s should be unavailable: %+v", modality, capability)
+		}
+		if capability.UnavailableReason == nil || capability.UnavailableReason.Code == "" || capability.UnavailableReason.Message == "" {
+			t.Fatalf("%s missing typed unavailable reason: %+v", modality, capability)
+		}
+	}
+}
+
+func TestPlaygroundInferTextGenerationUnavailable(t *testing.T) {
+	setBrokerTestEnv(t, "tt")
+	body := strings.NewReader(`{"registry_slug":"tiny-text","modality":"text-generation","prompt":"hello world"}`)
+	req := httptest.NewRequest(http.MethodPost, "/playground/infer?token=tt", body)
+	rec := httptest.NewRecorder()
+	playgroundInferHandler(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var decoded struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decode error: %v body=%s", err, rec.Body.String())
+	}
+	if decoded.Error.Code != "playground_inference_unavailable" {
+		t.Fatalf("unexpected error code: %+v", decoded.Error)
+	}
+	if !strings.Contains(decoded.Error.Message, playgroundModalityTextGeneration) || !strings.Contains(decoded.Error.Message, "real text-generation backend") {
+		t.Fatalf("error message is not actionable for text generation: %q", decoded.Error.Message)
+	}
+}
+
+func TestPlaygroundInferTextEmbeddingAndImageUnavailable(t *testing.T) {
+	setBrokerTestEnv(t, "tt")
+	for _, modality := range []string{playgroundModalityEmbedding, playgroundModalityImage} {
+		t.Run(modality, func(t *testing.T) {
+			body := strings.NewReader(fmt.Sprintf(`{"registry_slug":"%s-model","modality":%q,"prompt":"hello"}`, modality, modality))
+			req := httptest.NewRequest(http.MethodPost, "/playground/infer?token=tt", body)
+			rec := httptest.NewRecorder()
+			playgroundInferHandler(rec, req)
+			if rec.Code < 400 {
+				t.Fatalf("expected non-2xx, got %d body=%s", rec.Code, rec.Body.String())
+			}
+			var decoded struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
+				t.Fatalf("decode error: %v body=%s", err, rec.Body.String())
+			}
+			if decoded.Error.Code != "playground_inference_unavailable" {
+				t.Fatalf("unexpected error code: %+v", decoded.Error)
+			}
+			if !strings.Contains(decoded.Error.Message, modality) || !strings.Contains(decoded.Error.Message, "real "+modality+" backend") {
+				t.Fatalf("error message is not actionable for %s: %q", modality, decoded.Error.Message)
+			}
+		})
 	}
 }
 
