@@ -832,7 +832,7 @@ export async function runGatewayCommand(opts: GatewayRunOpts) {
   // `--host <ip>` is an advanced override. When passed we use it as the
   // health-probe host too, otherwise we resolve via the chosen bind mode.
   const hostOverride = toOptionString(opts.host);
-  const healthHost =
+  const healthProbeHost =
     hostOverride ?? (await resolveGatewayBindHost(bind, cfg.gateway?.customBindHost));
   const openaiChatCompletionsOverride = opts.openaiChatCompletions ? true : undefined;
   let startupConfigSnapshotReadForNextStart = startupConfigSnapshotRead;
@@ -843,7 +843,7 @@ export async function runGatewayCommand(opts: GatewayRunOpts) {
     await runGatewayLoop({
       runtime: defaultRuntime,
       lockPort: port,
-      healthHost,
+      healthHost: healthProbeHost,
       start: async ({ startupStartedAt } = {}) => {
         const startupConfigSnapshotReadForThisStart = startupConfigSnapshotReadForNextStart;
         startupConfigSnapshotReadForNextStart = undefined;
@@ -871,7 +871,7 @@ export async function runGatewayCommand(opts: GatewayRunOpts) {
       startLoop,
       supervisor,
       port,
-      healthHost,
+      healthHost: healthProbeHost,
       log: gatewayLog,
     });
   } catch (err) {
