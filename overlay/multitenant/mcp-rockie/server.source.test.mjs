@@ -214,6 +214,104 @@ test("stop_inference_load is listed and proxies without tenant ids in the body",
   assert.deepEqual(JSON.parse(calls[0].init.body), { arguments: { load_id: "load-1" } });
 });
 
+test("Pebble read-only platform tools are advertised with the platform-context schemas", () => {
+  const tools = __rockieMcpTestHooks().listTools();
+  const byName = new Map(tools.map((tool) => [tool.name, tool]));
+
+  // platform_user_state — no args.
+  const userState = byName.get("platform_user_state");
+  assert.ok(userState, "platform_user_state must be advertised");
+  assert.deepEqual(userState.inputSchema, {
+    type: "object",
+    properties: {},
+    required: [],
+    additionalProperties: false,
+  });
+
+  // platform_labs_list — optional include_archived boolean.
+  const labsList = byName.get("platform_labs_list");
+  assert.ok(labsList, "platform_labs_list must be advertised");
+  assert.deepEqual(labsList.inputSchema, {
+    type: "object",
+    properties: {
+      include_archived: {
+        type: "boolean",
+        default: false,
+        description: "Include archived labs (default: only active).",
+      },
+    },
+    required: [],
+    additionalProperties: false,
+  });
+
+  // platform_labs_get — required lab_id.
+  const labsGet = byName.get("platform_labs_get");
+  assert.ok(labsGet, "platform_labs_get must be advertised");
+  assert.deepEqual(labsGet.inputSchema, {
+    type: "object",
+    properties: { lab_id: { type: "string", description: "The lab (notebook) id." } },
+    required: ["lab_id"],
+    additionalProperties: false,
+  });
+
+  // platform_billing_summary — no args.
+  const billing = byName.get("platform_billing_summary");
+  assert.ok(billing, "platform_billing_summary must be advertised");
+  assert.deepEqual(billing.inputSchema, {
+    type: "object",
+    properties: {},
+    required: [],
+    additionalProperties: false,
+  });
+});
+
+test("Pebble platform tools proxy to /api/agent-tools/{name} with tenant auth and no tenant_id in args", async () => {
+  const hooks = __rockieMcpTestHooks();
+  const cases = [
+    { name: "platform_user_state", args: {}, reply: { labs: 2, charters: 1 } },
+    { name: "platform_labs_list", args: { include_archived: true }, reply: { labs: [] } },
+    { name: "platform_labs_get", args: { lab_id: "notebook:abc" }, reply: { name: "Proteins" } },
+    { name: "platform_billing_summary", args: {}, reply: { balance_cents: 4200 } },
+  ];
+
+  for (const c of cases) {
+    const calls = [];
+    globalThis.fetch = async (url, init = {}) => {
+      calls.push({ url, init });
+      return response(c.reply);
+    };
+
+    const result = await hooks.handleCallToolRequest({
+      params: { name: c.name, arguments: c.args },
+    });
+
+    assert.equal(result.isError, undefined, `${c.name} should not error`);
+    assert.deepEqual(JSON.parse(result.content[0].text), c.reply);
+    assert.equal(calls.length, 1, `${c.name} makes exactly one HTTP call`);
+    assert.equal(
+      calls[0].url,
+      `https://api.rockielab.test/api/agent-tools/${c.name}`,
+      `${c.name} hits the right endpoint`,
+    );
+    assert.equal(calls[0].init.method, "POST");
+    // Tenant auth path — reused from every other proxied tool.
+    assert.equal(calls[0].init.headers.Authorization, "Bearer platform-password");
+    assert.equal(calls[0].init.headers["X-Tenant-Token"], "tenant-token");
+    assert.equal(calls[0].init.headers["X-Tenant-Id"], "tenant-id");
+    assert.equal(calls[0].init.headers["X-Operator-Tenant-Id"], "operator-tenant-id");
+    // Args are passed verbatim; the tenant is NEVER carried in the body.
+    const body = JSON.parse(calls[0].init.body);
+    assert.deepEqual(body, { arguments: c.args });
+    assert.ok(!("tenant_id" in body.arguments), `${c.name} args carry no tenant_id`);
+  }
+});
+
+// Reads the canonical tool names from the sibling platform-context
+// schemas.py. CI checks out a fresh platform-context (and/or sets
+// PLATFORM_CONTEXT_SCHEMAS_PATH), so it sees the current contract. A
+// LOCAL run can FALSE-NEGATIVE if the sibling checkout is stale (e.g. a
+// cascade worktree pinned behind a just-merged schema PR) — point it at
+// the right file with PLATFORM_CONTEXT_SCHEMAS_PATH=/path/to/schemas.py.
 test("static MCP catalog stays in parity with platform-context schemas", () => {
   const platformNames = new Set(platformContextToolNames());
   const runtimeNames = new Set(
