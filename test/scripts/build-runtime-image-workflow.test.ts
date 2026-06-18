@@ -69,6 +69,14 @@ describe("build-runtime-image rollout workflow", () => {
     expect(dockerfile).toContain("COPY apps/broker/ ./");
   });
 
+  it("copies root lifecycle scripts before pnpm install in the runtime image build", () => {
+    const dockerfile = readFileSync(DOCKERFILE_PATH, "utf8");
+
+    expect(dockerfile).toContain(
+      "COPY scripts/postinstall-bundled-plugins.mjs scripts/preinstall-package-manager-warning.mjs scripts/prepare-git-hooks.mjs scripts/npm-runner.mjs scripts/windows-cmd-helpers.mjs ./scripts/",
+    );
+  });
+
   it("cancels superseded image builds and avoids unnecessary QEMU setup", () => {
     const workflow = readWorkflow();
     expect(workflow.concurrency).toMatchObject({
