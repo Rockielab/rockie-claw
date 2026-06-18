@@ -206,10 +206,10 @@ type modelCatalogError struct {
 }
 
 type modelCatalogModel struct {
-	ID        string         `json:"id"`
-	Name      string         `json:"name,omitempty"`
-	Provider  string         `json:"provider,omitempty"`
-	Available *bool          `json:"available,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	Available *bool  `json:"available,omitempty"`
 }
 
 type modelCatalogResponse struct {
@@ -305,7 +305,11 @@ func harnessVersion(ctx context.Context, harness string) string {
 }
 
 func fetchSubscriptionCatalog(ctx context.Context, harness string) ([]modelCatalogModel, error) {
-	out, err := commandOutput(ctx, harness, "models", "list", "--json")
+	args := []string{"models", "list", "--json"}
+	if harness == "codex" {
+		args = []string{"debug", "models"}
+	}
+	out, err := commandOutput(ctx, harness, args...)
 	if err != nil {
 		return nil, modelCatalogCommandError{
 			code:    "catalog_unsupported",
@@ -387,14 +391,14 @@ func parseModelCatalogOutput(out []byte) ([]modelCatalogModel, error) {
 
 func modelFromCatalogEntry(entry map[string]any) modelCatalogModel {
 	provider := firstString(entry, "provider", "provider_id")
-	modelID := firstString(entry, "id", "model", "model_id", "name")
+	modelID := firstString(entry, "id", "model", "model_id", "slug", "name")
 	key := firstString(entry, "key")
 	if key != "" {
 		modelID = key
 	} else if provider != "" && modelID != "" && !strings.Contains(modelID, "/") {
 		modelID = provider + "/" + modelID
 	}
-	name := firstString(entry, "name", "display_name", "label")
+	name := firstString(entry, "display_name", "name", "label")
 	if name == modelID {
 		name = ""
 	}
