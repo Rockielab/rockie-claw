@@ -610,6 +610,70 @@ const STATIC_TOOLS = [
       additionalProperties: false,
     },
   },
+  // ---------------------------------------------------------------
+  // Pebble (head-orchestrator) read-only platform tools (#956).
+  // Mirror of the platform_* entries in platform-context
+  // api/agent_tools/schemas.py. Tenant scope is derived server-side
+  // from the request context (X-Tenant-Token); these args NEVER carry
+  // a tenant_id. Each proxies through the generic callTool() path to
+  // POST /api/agent-tools/{name} like every other static tool — no
+  // new auth, no special-casing. READ-ONLY: none of them write.
+  // ---------------------------------------------------------------
+  {
+    name: "platform_user_state",
+    description:
+      "Read the current user's onboarding state across the whole platform: how many labs they have, whether any lab has a saved charter (LAB.md), and which third-party providers (GitHub, Hugging Face) are connected. Use this FIRST when the user seems new or asks 'what should I do next' — it tells you what they've already done so you suggest the right next step instead of guessing. Read-only; never changes anything.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "platform_labs_list",
+    description:
+      "List the current user's labs (notebooks) with name, description, archived flag, source/note counts, and last-updated time. Use to answer cross-lab questions ('which lab was I working on the protein thing?') or to ground a handoff. Scoped to the calling tenant; read-only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        include_archived: {
+          type: "boolean",
+          default: false,
+          description: "Include archived labs (default: only active).",
+        },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "platform_labs_get",
+    description:
+      "Get a navigation-oriented summary of ONE lab: name, description, archived flag, and source/note counts. Lighter than notebook_read (no source/note listings) — use it to confirm a lab before pointing the user there or handing off. Scoped to the calling tenant; read-only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        lab_id: {
+          type: "string",
+          description: "The lab (notebook) id.",
+        },
+      },
+      required: ["lab_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "platform_billing_summary",
+    description:
+      "Read the current user's compute-credit balance (the GPU credit ledger), in cents and USD. Use to answer 'how much GPU spend do I have left?'. READ-ONLY: it only sums the tenant's ledger — it cannot grant, charge, settle, or change any balance. If the user asks to add credit or change a plan, refuse and point them to the billing page.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    },
+  },
 ];
 
 const LOCAL_TOOLS = [
