@@ -77,6 +77,16 @@ describe("build-runtime-image rollout workflow", () => {
     );
   });
 
+  it("bounds the optional A2UI bundle with a direct node invocation", () => {
+    const dockerfile = readFileSync(DOCKERFILE_PATH, "utf8");
+
+    expect(dockerfile).toContain("RUN timeout --kill-after=10s 120s node scripts/bundle-a2ui.mjs");
+    expect(dockerfile).toContain("A2UI bundle: creating stub (non-fatal)");
+    expect(dockerfile).toContain("extensions/canvas/src/host/a2ui/a2ui.bundle.js");
+    expect(dockerfile).toContain("rm -rf extensions/canvas/src/host/a2ui-app");
+    expect(dockerfile).not.toContain("RUN pnpm canvas:a2ui:bundle");
+  });
+
   it("cancels superseded image builds and avoids unnecessary QEMU setup", () => {
     const workflow = readWorkflow();
     expect(workflow.concurrency).toMatchObject({

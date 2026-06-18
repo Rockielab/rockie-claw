@@ -77,12 +77,12 @@ RUN for dir in /app/${OPENCLAW_BUNDLED_PLUGIN_DIR} /app/.agent /app/.agents; do 
       fi; \
     done
 
-RUN pnpm canvas:a2ui:bundle || \
+RUN timeout --kill-after=10s 120s node scripts/bundle-a2ui.mjs || \
     (echo "A2UI bundle: creating stub (non-fatal)" && \
-     mkdir -p src/canvas-host/a2ui && \
-     echo "/* A2UI bundle unavailable in this build */" > src/canvas-host/a2ui/a2ui.bundle.js && \
-     echo "stub" > src/canvas-host/a2ui/.bundle.hash && \
-     rm -rf vendor/a2ui apps/shared/OpenClawKit/Tools/CanvasA2UI)
+     mkdir -p extensions/canvas/src/host/a2ui && \
+     echo "/* A2UI bundle unavailable in this build */" > extensions/canvas/src/host/a2ui/a2ui.bundle.js && \
+     echo "stub" > extensions/canvas/src/host/a2ui/.bundle.hash && \
+     rm -rf extensions/canvas/src/host/a2ui-app vendor/a2ui apps/shared/OpenClawKit/Tools/CanvasA2UI)
 RUN pnpm build:docker
 ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:build

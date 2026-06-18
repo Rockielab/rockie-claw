@@ -226,8 +226,9 @@ describe("Dockerfile", () => {
     expect(qaLabDistCopyIndex).toBeGreaterThan(qaLabBuildIndex);
     expect(qaLabDistCopyIndex).toBeLessThan(runtimeAssetsIndex);
     expect(dockerfile).toContain(
-      "pnpm_config_verify_deps_before_run=false pnpm canvas:a2ui:bundle",
+      "timeout --kill-after=10s 120s node scripts/bundle-a2ui.mjs",
     );
+    expect(dockerfile).toContain("rm -rf extensions/canvas/src/host/a2ui-app");
     expect(dockerfile).toContain("pnpm_config_verify_deps_before_run=false pnpm ui:build");
     expect(dockerfile).toContain("pnpm_config_verify_deps_before_run=false pnpm qa:lab:build");
   });
