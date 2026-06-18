@@ -250,6 +250,189 @@ func TestPlaygroundInferTextEmbeddingAndImageUnavailable(t *testing.T) {
 	}
 }
 
+func withFakeCatalogCommand(t *testing.T, fn func(context.Context, string, ...string) *exec.Cmd) {
+	t.Helper()
+	old := commandContext
+	commandContext = fn
+	t.Cleanup(func() {
+		commandContext = old
+	})
+}
+
+func fakeCatalogCommand(t *testing.T, script string) func(context.Context, string, ...string) *exec.Cmd {
+	t.Helper()
+	return func(ctx context.Context, binary string, args ...string) *exec.Cmd {
+		cmdArgs := []string{"-test.run=TestCatalogCommandHelper", "--", binary}
+		cmdArgs = append(cmdArgs, args...)
+		cmd := exec.CommandContext(ctx, os.Args[0], cmdArgs...)
+		cmd.Env = append(os.Environ(),
+			"GO_WANT_HELPER_PROCESS=1",
+			"CATALOG_HELPER_SCRIPT="+script,
+		)
+		return cmd
+	}
+}
+
+func assertCatalogOmitsSensitiveFields(t *testing.T, rawJSON string) {
+	t.Helper()
+	for _, forbidden := range []string{"api_key", "token", "base_url", "secret.example"} {
+		if strings.Contains(rawJSON, forbidden) {
+			t.Fatalf("catalog response leaked sensitive provider field %q: %s", forbidden, rawJSON)
+		}
+	}
+}
+
+func TestCatalogCommandHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	args := os.Args
+	for len(args) > 0 && args[0] != "--" {
+		args = args[1:]
+	}
+	if len(args) == 0 {
+		os.Exit(2)
+	}
+	args = args[1:]
+	binary := ""
+	if len(args) > 0 {
+		binary = args[0]
+	}
+	rest := args[1:]
+	script := os.Getenv("CATALOG_HELPER_SCRIPT")
+	switch script {
+	case "claude-unsupported":
+		if binary == "claude" && len(rest) == 1 && rest[0] == "--version" {
+			fmt.Fprint(os.Stdout, "claude-test 1.2.3\n")
+			os.Exit(0)
+		}
+		fmt.Fprint(os.Stderr, "unsupported\n")
+		os.Exit(1)
+	case "openclaw-json":
+		if binary == "openclaw" && len(rest) == 1 && rest[0] == "--version" {
+			fmt.Fprint(os.Stdout, "openclaw-test 9.8.7\n")
+			os.Exit(0)
+		}
+		if binary == "openclaw" && strings.Join(rest, " ") == "models list --all --json" {
+			fmt.Fprint(os.Stdout, `{"models":[{"key":"moonshot/kimi-k2.6","id":"kimi-k2.6","name":"Kimi K2.6","provider":"moonshot","available":true,"api_key":"secret","token":"secret","base_url":"https://secret.example"},{"id":"glm-4.5-air","provider":"zhipu"}]}`)
+			os.Exit(0)
+		}
+		fmt.Fprint(os.Stderr, "unexpected command\n")
+		os.Exit(1)
+	case "codex-debug-models":
+		if binary == "codex" && len(rest) == 1 && rest[0] == "--version" {
+			fmt.Fprint(os.Stdout, "codex-test 2.3.4\n")
+			os.Exit(0)
+		}
+		if binary == "codex" && strings.Join(rest, " ") == "debug models" {
+			fmt.Fprint(os.Stdout, `{"models":[{"slug":"gpt-5.5","display_name":"GPT-5.5","available":true,"api_key":"secret","token":"secret","base_url":"https://secret.example"},{"slug":"gpt-5.5-mini","display_name":"GPT-5.5 mini"}]}`)
+			os.Exit(0)
+		}
+		fmt.Fprint(os.Stderr, "unexpected command\n")
+		os.Exit(1)
+	default:
+		os.Exit(2)
+	}
+}
+
+func TestModelCatalogClaudeUnsupportedReturnsDefaultFallback(t *testing.T) {
+	setBrokerTestEnv(t, "tt")
+	withFakeCatalogCommand(t, fakeCatalogCommand(t, "claude-unsupported"))
+
+	req := httptest.NewRequest(http.MethodGet, "/models/catalog?harness=claude&token=tt", nil)
+	rec := httptest.NewRecorder()
+	modelCatalogHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body modelCatalogResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode catalog: %v body=%s", err, rec.Body.String())
+	}
+	if body.Harness != "claude" || body.Source != "default_fallback" {
+		t.Fatalf("unexpected source metadata: %+v", body)
+	}
+	if body.HarnessVersion != "claude-test 1.2.3" {
+		t.Fatalf("expected harness version, got %q", body.HarnessVersion)
+	}
+	if body.FetchedAt == "" || body.Error == nil || body.Error.Code != "catalog_unsupported" {
+		t.Fatalf("missing fallback metadata: %+v", body)
+	}
+	if len(body.Models) != 1 || body.Models[0].ID != body.DefaultModel {
+		t.Fatalf("expected default-only model, got %+v", body.Models)
+	}
+}
+
+func TestModelCatalogOpenClawUsesProviderQualifiedCatalogRows(t *testing.T) {
+	setBrokerTestEnv(t, "tt")
+	withFakeCatalogCommand(t, fakeCatalogCommand(t, "openclaw-json"))
+
+	req := httptest.NewRequest(http.MethodGet, "/models/catalog?harness=openclaw&token=tt", nil)
+	rec := httptest.NewRecorder()
+	modelCatalogHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body modelCatalogResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode catalog: %v body=%s", err, rec.Body.String())
+	}
+	if body.Harness != "openclaw" || body.Source != "runtime" {
+		t.Fatalf("unexpected source metadata: %+v", body)
+	}
+	if body.HarnessVersion != "openclaw-test 9.8.7" || body.FetchedAt == "" {
+		t.Fatalf("missing response metadata: %+v", body)
+	}
+	if len(body.Models) != 2 {
+		t.Fatalf("expected two models, got %+v", body.Models)
+	}
+	if body.Models[0].ID != "moonshot/kimi-k2.6" || body.Models[0].Provider != "moonshot" {
+		t.Fatalf("provider-qualified key was not preserved: %+v", body.Models[0])
+	}
+	if body.Models[1].ID != "zhipu/glm-4.5-air" || body.Models[1].Provider != "zhipu" {
+		t.Fatalf("provider/model id was not qualified: %+v", body.Models[1])
+	}
+	assertCatalogOmitsSensitiveFields(t, rec.Body.String())
+}
+
+func TestModelCatalogCodexUsesDebugModelsJSON(t *testing.T) {
+	setBrokerTestEnv(t, "tt")
+	withFakeCatalogCommand(t, fakeCatalogCommand(t, "codex-debug-models"))
+
+	req := httptest.NewRequest(http.MethodGet, "/models/catalog?harness=codex&token=tt", nil)
+	rec := httptest.NewRecorder()
+	modelCatalogHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body modelCatalogResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode catalog: %v body=%s", err, rec.Body.String())
+	}
+	if body.Harness != "codex" || body.Source != "runtime" {
+		t.Fatalf("unexpected source metadata: %+v", body)
+	}
+	if body.HarnessVersion != "codex-test 2.3.4" || body.FetchedAt == "" || body.Error != nil {
+		t.Fatalf("missing response metadata: %+v", body)
+	}
+	if len(body.Models) != 2 {
+		t.Fatalf("expected two models, got %+v", body.Models)
+	}
+	if body.Models[0].ID != "gpt-5.5" || body.Models[0].Name != "GPT-5.5" || body.Models[0].Provider != "" {
+		t.Fatalf("codex model row was not preserved: %+v", body.Models[0])
+	}
+	if body.Models[0].Available == nil || !*body.Models[0].Available {
+		t.Fatalf("codex availability was not preserved: %+v", body.Models[0])
+	}
+	if body.Models[1].ID != "gpt-5.5-mini" || body.Models[1].Name != "GPT-5.5 mini" || body.Models[1].Provider != "" {
+		t.Fatalf("codex model row was not preserved: %+v", body.Models[1])
+	}
+	assertCatalogOmitsSensitiveFields(t, rec.Body.String())
+}
+
 // Auto-execute contract for the spawn-per-prompt /chat path: claude
 // must be spawned with --dangerously-skip-permissions for the same
 // reason as the /chat-pty path. fleet-task #102.

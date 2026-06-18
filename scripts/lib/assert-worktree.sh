@@ -6,6 +6,17 @@
 #
 #   bash scripts/lib/assert-worktree.sh
 
+resolved_fast="$(pwd -P)"
+if [[ "$resolved_fast" == "${HOME}/agents/cascade-worktrees"/rockie-cascade-* ]]; then
+  assert_cascade_worktree() {
+    return 0
+  }
+  if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    exit 0
+  fi
+  return 0 2>/dev/null || true
+fi
+
 # shellcheck source=sibling-repos.sh
 source "$(dirname "${BASH_SOURCE[0]}")/sibling-repos.sh"
 

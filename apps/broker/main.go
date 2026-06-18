@@ -200,6 +200,37 @@ type playgroundInferRequest struct {
 	Prompt       string `json:"prompt"`
 }
 
+type modelCatalogError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type modelCatalogModel struct {
+	ID        string `json:"id"`
+	Name      string `json:"name,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	Available *bool  `json:"available,omitempty"`
+}
+
+type modelCatalogResponse struct {
+	Harness        string              `json:"harness"`
+	HarnessVersion string              `json:"harness_version,omitempty"`
+	DefaultModel   string              `json:"default_model"`
+	Models         []modelCatalogModel `json:"models"`
+	Source         string              `json:"source"`
+	FetchedAt      string              `json:"fetched_at"`
+	Error          *modelCatalogError  `json:"error"`
+}
+
+type modelCatalogCommandError struct {
+	code    string
+	message string
+}
+
+func (e modelCatalogCommandError) Error() string {
+	return e.message
+}
+
 func playgroundUnavailableCapability(message string) playgroundModalityCapability {
 	return playgroundModalityCapability{
 		Available: false,
@@ -224,6 +255,235 @@ func playgroundCapabilities() playgroundCapabilitiesResponse {
 			),
 		},
 	}
+}
+
+func defaultModelForHarness(harness string) string {
+	envName := "ROCKIELAB_" + strings.ToUpper(harness) + "_DEFAULT_MODEL"
+	if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(os.Getenv("ROCKIELAB_DEFAULT_MODEL")); value != "" {
+		return value
+	}
+	return "default"
+}
+
+func defaultOnlyModelCatalog(harness, harnessVersion, source string, err *modelCatalogError) modelCatalogResponse {
+	defaultModel := defaultModelForHarness(harness)
+	return modelCatalogResponse{
+		Harness:        harness,
+		HarnessVersion: harnessVersion,
+		DefaultModel:   defaultModel,
+		Models: []modelCatalogModel{{
+			ID: defaultModel,
+		}},
+		Source:    source,
+		FetchedAt: time.Now().UTC().Format(time.RFC3339),
+		Error:     err,
+	}
+}
+
+func commandOutput(ctx context.Context, binary string, args ...string) ([]byte, error) {
+	cmd := commandContext(ctx, binary, args...)
+	if len(cmd.Env) == 0 {
+		cmd.Env = ownedChildEnv()
+	} else {
+		cmd.Env = append(cmd.Env, ownedChildEnv()...)
+	}
+	return cmd.Output()
+}
+
+func harnessVersion(ctx context.Context, harness string) string {
+	if harness == "" {
+		return ""
+	}
+	out, err := commandOutput(ctx, harness, "--version")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func fetchSubscriptionCatalog(ctx context.Context, harness string) ([]modelCatalogModel, error) {
+	args := []string{"models", "list", "--json"}
+	if harness == "codex" {
+		args = []string{"debug", "models"}
+	}
+	out, err := commandOutput(ctx, harness, args...)
+	if err != nil {
+		return nil, modelCatalogCommandError{
+			code:    "catalog_unsupported",
+			message: fmt.Sprintf("%s does not expose a supported JSON model catalog command", harness),
+		}
+	}
+	models, err := parseModelCatalogOutput(out)
+	if err != nil {
+		return nil, modelCatalogCommandError{
+			code:    "catalog_parse_failed",
+			message: "model catalog command returned unrecognized JSON",
+		}
+	}
+	if len(models) == 0 {
+		return nil, modelCatalogCommandError{
+			code:    "catalog_empty",
+			message: "model catalog command returned no models",
+		}
+	}
+	return models, nil
+}
+
+func fetchOpenClawCatalog(ctx context.Context) ([]modelCatalogModel, error) {
+	out, err := commandOutput(ctx, "openclaw", "models", "list", "--all", "--json")
+	if err != nil {
+		return nil, modelCatalogCommandError{
+			code:    "catalog_unavailable",
+			message: "openclaw provider-aware model catalog command failed",
+		}
+	}
+	models, err := parseModelCatalogOutput(out)
+	if err != nil {
+		return nil, modelCatalogCommandError{
+			code:    "catalog_parse_failed",
+			message: "openclaw provider-aware model catalog command returned unrecognized JSON",
+		}
+	}
+	if len(models) == 0 {
+		return nil, modelCatalogCommandError{
+			code:    "catalog_empty",
+			message: "openclaw provider-aware model catalog command returned no models",
+		}
+	}
+	return models, nil
+}
+
+func parseModelCatalogOutput(out []byte) ([]modelCatalogModel, error) {
+	var decoded any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		return nil, err
+	}
+	var rawModels []any
+	switch v := decoded.(type) {
+	case []any:
+		rawModels = v
+	case map[string]any:
+		if models, ok := v["models"].([]any); ok {
+			rawModels = models
+		} else if data, ok := v["data"].([]any); ok {
+			rawModels = data
+		}
+	default:
+		return nil, errors.New("catalog JSON must be an array or object")
+	}
+	models := make([]modelCatalogModel, 0, len(rawModels))
+	for _, raw := range rawModels {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		model := modelFromCatalogEntry(entry)
+		if model.ID == "" {
+			continue
+		}
+		models = append(models, model)
+	}
+	return models, nil
+}
+
+func modelFromCatalogEntry(entry map[string]any) modelCatalogModel {
+	provider := firstString(entry, "provider", "provider_id")
+	modelID := firstString(entry, "id", "model", "model_id", "slug", "name")
+	key := firstString(entry, "key")
+	if key != "" {
+		modelID = key
+	} else if provider != "" && modelID != "" && !strings.Contains(modelID, "/") {
+		modelID = provider + "/" + modelID
+	}
+	name := firstString(entry, "display_name", "name", "label")
+	if name == modelID {
+		name = ""
+	}
+	var available *bool
+	if v, ok := entry["available"].(bool); ok {
+		available = &v
+	}
+	return modelCatalogModel{
+		ID:        modelID,
+		Name:      name,
+		Provider:  provider,
+		Available: available,
+	}
+}
+
+func firstString(entry map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := entry[key].(string); ok {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func modelCatalogHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed",
+			"only GET is allowed on /models/catalog")
+		return
+	}
+	if !requireBrokerRequest(w, r) {
+		return
+	}
+
+	harness := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("harness")))
+	if harness == "" {
+		harness = "claude"
+	}
+	if harness != "claude" && harness != "codex" && harness != "openclaw" {
+		jsonError(w, http.StatusBadRequest, "invalid_harness",
+			"harness must be one of claude, codex, openclaw")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	version := harnessVersion(ctx, harness)
+	var models []modelCatalogModel
+	var err error
+	if harness == "openclaw" {
+		models, err = fetchOpenClawCatalog(ctx)
+	} else {
+		models, err = fetchSubscriptionCatalog(ctx, harness)
+	}
+
+	var resp modelCatalogResponse
+	if err != nil {
+		catalogErr := &modelCatalogError{Code: "catalog_unavailable", Message: err.Error()}
+		var commandErr modelCatalogCommandError
+		if errors.As(err, &commandErr) {
+			catalogErr.Code = commandErr.code
+			catalogErr.Message = commandErr.message
+		}
+		resp = defaultOnlyModelCatalog(harness, version, "default_fallback", catalogErr)
+	} else {
+		defaultModel := defaultModelForHarness(harness)
+		if defaultModel == "default" && len(models) > 0 {
+			defaultModel = models[0].ID
+		}
+		resp = modelCatalogResponse{
+			Harness:        harness,
+			HarnessVersion: version,
+			DefaultModel:   defaultModel,
+			Models:         models,
+			Source:         "runtime",
+			FetchedAt:      time.Now().UTC().Format(time.RFC3339),
+			Error:          nil,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func playgroundCapabilitiesHandler(w http.ResponseWriter, r *http.Request) {
@@ -1385,6 +1645,7 @@ func run() error {
 	mux.HandleFunc("/secret-get", secretGetHandler)
 	mux.HandleFunc("/playground/capabilities", playgroundCapabilitiesHandler)
 	mux.HandleFunc("/playground/infer", playgroundInferHandler)
+	mux.HandleFunc("/models/catalog", modelCatalogHandler)
 	mux.HandleFunc("/chat", chatHandler)
 	mux.HandleFunc("/chat-pty", chatPTYHandler)
 	mux.HandleFunc("/datasets", finalizedDatasets)
