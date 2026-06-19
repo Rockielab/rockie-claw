@@ -1008,6 +1008,142 @@ func TestBrokerCommandHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+// --- nugget (Goose) spawn/chat contract — S2 ---------------------------
+
+func TestNuggetIsAllowedBinary(t *testing.T) {
+	if _, ok := allowedBinaries["nugget"]; !ok {
+		t.Fatalf("nugget must be in allowedBinaries (gates /ws spawn)")
+	}
+}
+
+func TestResolveWSBinaryAcceptsNugget(t *testing.T) {
+	got, ok := resolveWSBinary("nugget")
+	if !ok || got != "nugget" {
+		t.Fatalf("resolveWSBinary(nugget) = %q,%v; want nugget,true", got, ok)
+	}
+}
+
+func TestResolveChatBinaryAcceptsNugget(t *testing.T) {
+	got, ok := resolveChatBinary("nugget")
+	if !ok || got != "nugget" {
+		t.Fatalf("resolveChatBinary(nugget) = %q,%v; want nugget,true", got, ok)
+	}
+}
+
+func TestNuggetChatArgsFreshUsesNoSession(t *testing.T) {
+	args := nuggetChatArgs("list the files", "")
+	want := []string{"run", "--no-session", "-t", "list the files"}
+	if !slices.Equal(args, want) {
+		t.Fatalf("fresh nugget args mismatch:\n got: %v\nwant: %v", args, want)
+	}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--name") {
+		t.Fatalf("fresh turn must not resume a named session, got %q", joined)
+	}
+	if got := args[len(args)-1]; got != "list the files" {
+		t.Fatalf("expected prompt as final arg, got %q", got)
+	}
+}
+
+func TestNuggetChatArgsResumeUsesNamedSession(t *testing.T) {
+	args := nuggetChatArgs("next turn", "sess-9")
+	want := []string{"run", "--name", "sess-9", "-t", "next turn"}
+	if !slices.Equal(args, want) {
+		t.Fatalf("resume nugget args mismatch:\n got: %v\nwant: %v", args, want)
+	}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--no-session") {
+		t.Fatalf("resume turn must not pass --no-session, got %q", joined)
+	}
+	if got := strings.Count(strings.Join(args, "\x00"), "next turn"); got != 1 {
+		t.Fatalf("expected prompt exactly once, got %d in %v", got, args)
+	}
+}
+
+// TestNuggetChatHandlerStreamsStubGooseOutput is the integration-style
+// proof: a stub `goose` (the broker command helper process, which emits a
+// couple of ndjson lines then exits 0) is spawned through the real
+// /chat?binary=nugget path, and the broker must relay those lines and
+// terminate cleanly on exit. Mirrors the codex chat-handler test and
+// chat_pty_test.go's stub-binary approach. nugget has no on-disk auth
+// file (env-key injection is S5), so authFileExists("nugget")==true and
+// the spawn is not gated.
+func TestNuggetChatHandlerStreamsStubGooseOutput(t *testing.T) {
+	record, body := runNuggetChatWithRecordedCommandAndBody(t,
+		`{"prompt":"summarize the repo","timeout":1}`)
+
+	if record.Name != "nugget" {
+		t.Fatalf("expected nugget binary, got %q", record.Name)
+	}
+	wantArgs := nuggetChatArgs(flattenHistory(nil, "summarize the repo"), "")
+	if !slices.Equal(record.Args, wantArgs) {
+		t.Fatalf("nugget handler args mismatch:\n got: %v\nwant: %v", record.Args, wantArgs)
+	}
+
+	// The two stub ndjson lines must be relayed verbatim, line-by-line.
+	if !strings.Contains(body, `{"type":"token","text":"hello from goose"}`) {
+		t.Fatalf("missing first stub frame in streamed body: %s", body)
+	}
+	if !strings.Contains(body, `{"type":"done"}`) {
+		t.Fatalf("missing terminal stub frame in streamed body: %s", body)
+	}
+	// Clean exit (0) → broker must NOT synthesize a broker_runner_failed frame.
+	if strings.Contains(body, "broker_runner_failed") {
+		t.Fatalf("clean stub-goose exit must not produce an error frame: %s", body)
+	}
+}
+
+func TestNuggetChatHandlerResumesNamedSession(t *testing.T) {
+	record, _ := runNuggetChatWithRecordedCommandAndBody(t,
+		`{"prompt":"continue","session_id":"sess-9","timeout":1}`)
+	wantArgs := nuggetChatArgs("continue", "sess-9")
+	if !slices.Equal(record.Args, wantArgs) {
+		t.Fatalf("nugget resume handler args mismatch:\n got: %v\nwant: %v", record.Args, wantArgs)
+	}
+}
+
+func runNuggetChatWithRecordedCommandAndBody(t *testing.T, requestBody string) (recordedCommand, string) {
+	t.Helper()
+	withTempHome(t)
+	// No writeAuthFile: nugget auth is env-key based (S5), so there is no
+	// on-disk credential file and authFileExists("nugget") returns true.
+	setBrokerTestEnv(t, "tt")
+
+	recordPath := t.TempDir() + "/command.json"
+	output := strings.Join([]string{
+		`{"type":"token","text":"hello from goose"}`,
+		`{"type":"done"}`,
+		"",
+	}, "\n")
+
+	original := commandContext
+	commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		helperArgs := []string{"-test.run=TestBrokerCommandHelperProcess", "--", recordPath, output, name}
+		helperArgs = append(helperArgs, args...)
+		return exec.CommandContext(ctx, os.Args[0], helperArgs...)
+	}
+	t.Cleanup(func() { commandContext = original })
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/chat?binary=nugget&token=tt",
+		strings.NewReader(requestBody))
+	rec := httptest.NewRecorder()
+	chatHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	raw, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("read recorded command: %v", err)
+	}
+	var record recordedCommand
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatalf("decode recorded command: %v raw=%s", err, raw)
+	}
+	return record, rec.Body.String()
+}
+
 func TestFlattenHistory(t *testing.T) {
 	got := flattenHistory(nil, "hi")
 	if got != "hi" {
