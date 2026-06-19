@@ -58,6 +58,7 @@ const (
 var allowedBinaries = map[string]struct{}{
 	"claude": {},
 	"codex":  {},
+	"nugget": {},
 	"bash":   {},
 }
 
@@ -78,7 +79,7 @@ func resolveChatBinary(requested string) (string, bool) {
 		return "claude", true
 	}
 	switch requested {
-	case "claude", "codex":
+	case "claude", "codex", "nugget":
 		return requested, true
 	default:
 		return "", false
@@ -1427,6 +1428,40 @@ func codexResumeChatArgs(sessionID, promptArg string) []string {
 	}
 }
 
+// nuggetChatArgs builds the argv for the spawn-per-prompt nugget (Goose)
+// path. The `nugget` wrapper baked in S1 forwards its argv to the trimmed
+// `goose` binary, so these are Goose's headless `run` flags. The proven
+// headless form (nugget/serving/a3-goose-serving.md, a3c-mcp.md) is
+// `goose run --no-session -t <TEXT>`; provider/model come from the
+// GOOSE_PROVIDER/GOOSE_MODEL env Goose reads before any config file
+// (key injection lands in S5, not here).
+//
+// Session handling mirrors claude/codex: with no sessionID we spawn a
+// fresh, throwaway turn (`--no-session`); with a sessionID we ask Goose
+// to resume the named session (`--name <id>`, dropping `--no-session` so
+// the session file is read/written). The Goose stream-format details
+// (and the Goose-stream→platform-frame translation) are S3's job — this
+// slice only proves the broker spawns nugget and relays its stdout
+// ndjson line-by-line like claude/codex. fleet-task: nugget S2.
+func nuggetChatArgs(promptArg, sessionID string) []string {
+	args := []string{"run"}
+	if sessionID != "" {
+		// Resume a named, persisted Goose session.
+		args = append(args, "--name", sessionID)
+	} else {
+		// Throwaway turn — no session file.
+		args = append(args, "--no-session")
+	}
+	// Emit a structured ndjson event stream (one JSON object per line) instead of
+	// human-rendered text, so the broker relays it line-by-line and platform-context
+	// can translate Goose frames (message/complete) into the lab's frame vocabulary.
+	// A short ASCII banner may precede the JSON on stdout; downstream skips non-JSON
+	// lines. See nugget/serving/goose-stream-format.md for the captured contract.
+	args = append(args, "--output-format", "stream-json")
+	args = append(args, "-t", promptArg)
+	return args
+}
+
 func chatHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonError(w, http.StatusMethodNotAllowed, "method_not_allowed",
@@ -1459,7 +1494,7 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 	binary, ok := resolveChatBinary(r.URL.Query().Get("binary"))
 	if !ok {
 		jsonError(w, http.StatusBadRequest, "invalid_binary",
-			"binary must be claude or codex")
+			"binary must be claude, codex, or nugget")
 		return
 	}
 
@@ -1534,6 +1569,13 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			args = codexChatArgs(promptArg)
 		}
+	case "nugget":
+		// nugget (Goose) CLI: `run` headless. `--no-session` for fresh
+		// throwaway turns; `--name <session_id>` to resume a persisted
+		// Goose session. The wrapper baked in S1 forwards argv to goose.
+		// The Goose stdout stream is relayed verbatim as ndjson here;
+		// the Goose→platform-frame translator is platform-context's S3.
+		args = nuggetChatArgs(promptArg, req.SessionID)
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(),
