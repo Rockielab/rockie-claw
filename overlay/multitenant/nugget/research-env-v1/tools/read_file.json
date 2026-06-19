@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "read_file",
+  "description": "Read a file from the workspace. Returns the file's text. Paths are workspace-relative; the workspace root is invariant and never surfaced.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string", "minLength": 1 }
+    },
+    "required": ["path"],
+    "additionalProperties": false
+  }
+}

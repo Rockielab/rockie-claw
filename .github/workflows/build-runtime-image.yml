@@ -209,6 +209,13 @@ jobs:
           # vendored checkout above.
           build-contexts: |
             skills=vendor/platform-skills
+          # nugget/Goose (S1): supply the trimmed Goose binary URL + sha256 via
+          # repo secrets/vars once the artifact is published. When unset, the
+          # bake emits a not-provisioned stub and the image still builds with
+          # claude/codex/openclaw intact (additive + reversible).
+          build-args: |
+            NUGGET_GOOSE_URL=${{ secrets.NUGGET_GOOSE_URL || vars.NUGGET_GOOSE_URL }}
+            NUGGET_GOOSE_SHA256=${{ secrets.NUGGET_GOOSE_SHA256 || vars.NUGGET_GOOSE_SHA256 }}
           platforms: linux/amd64
           push: true
           tags: |

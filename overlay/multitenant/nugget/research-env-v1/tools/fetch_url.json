@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "fetch_url",
+  "description": "Fetch one URL and return its extracted main-content text. Use after web_search to read a specific source.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "url": { "type": "string", "minLength": 1 }
+    },
+    "required": ["url"],
+    "additionalProperties": false
+  }
+}

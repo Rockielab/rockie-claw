@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# nugget — thin wrapper on the trimmed Goose binary that IS the Rockie nugget harness.
+#
+# Baked alongside claude/codex/openclaw as a new BINARY option (S1 of the nugget
+# integration, plans/nugget-integration-2026-06-18.md). It does ONE thing: exec the
+# baked `goose` binary with the nugget defaults wired in (the research-env-v1 action
+# space config lives at ~/.config/goose/config.yaml in the image), so callers can run
+# e.g. `nugget run --no-session -t "<prompt>"` and get Goose driving OUR tools.
+#
+# It deliberately does NOT inject a provider key or pick a model — that is the MODE
+# wrapper's job (S5: BYOK vs Stone 1.0). At S1 the provider env (GOOSE_PROVIDER /
+# GOOSE_MODEL / the provider API key) is supplied by the caller.
+#
+# Reversible + additive: claude/codex/openclaw are untouched; `nugget` is a new PATH
+# entry that simply forwards to the baked goose binary.
+set -euo pipefail
+
+GOOSE_BIN="${NUGGET_GOOSE_BIN:-/opt/nugget/goose}"
+
+if [ ! -x "$GOOSE_BIN" ]; then
+  echo "nugget: goose binary not found or not executable at ${GOOSE_BIN}." >&2
+  echo "nugget: the trimmed Goose binary was not provisioned into this image" >&2
+  echo "        (build with --build-arg NUGGET_GOOSE_URL=<trimmed-goose-amd64>)." >&2
+  echo "        See plans/nugget-integration-2026-06-18.md (S1) for the artifact path." >&2
+  exit 127
+fi
+
+# Default the nugget research workspace so the MCP shim's real-FS tools have a home
+# unless the caller overrides RESEARCH_ENV_WORKSPACE.
+export RESEARCH_ENV_WORKSPACE="${RESEARCH_ENV_WORKSPACE:-${HOME}/workspace}"
+
+exec "$GOOSE_BIN" "$@"
