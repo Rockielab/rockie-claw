@@ -22,6 +22,7 @@ type WorkflowJob = {
   env?: Record<string, string>;
   permissions?: Record<string, string>;
   steps?: WorkflowStep[];
+  "timeout-minutes"?: number;
 };
 
 type Workflow = {
@@ -93,6 +94,7 @@ describe("build-runtime-image rollout workflow", () => {
       group: "build-runtime-image",
       "cancel-in-progress": true,
     });
+    expect(workflow.jobs?.build).toMatchObject({ "timeout-minutes": 120 });
 
     const text = readFileSync(WORKFLOW_PATH, "utf8");
     expect(text).not.toContain("docker/setup-qemu-action");

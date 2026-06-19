@@ -18,6 +18,8 @@ self-hosted-runner:
     - blacksmith-12vcpu-macos-15
     - blacksmith-6vcpu-macos-26
     - blacksmith-12vcpu-macos-26
+    # Rockielab self-hosted rollout runners
+    - rockie
 
 # Ignore patterns for known issues
 paths:
