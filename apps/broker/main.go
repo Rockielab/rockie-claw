@@ -1452,6 +1452,12 @@ func nuggetChatArgs(promptArg, sessionID string) []string {
 		// Throwaway turn — no session file.
 		args = append(args, "--no-session")
 	}
+	// Emit a structured ndjson event stream (one JSON object per line) instead of
+	// human-rendered text, so the broker relays it line-by-line and platform-context
+	// can translate Goose frames (message/complete) into the lab's frame vocabulary.
+	// A short ASCII banner may precede the JSON on stdout; downstream skips non-JSON
+	// lines. See nugget/serving/goose-stream-format.md for the captured contract.
+	args = append(args, "--output-format", "stream-json")
 	args = append(args, "-t", promptArg)
 	return args
 }

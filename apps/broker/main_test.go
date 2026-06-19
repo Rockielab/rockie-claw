@@ -1032,9 +1032,12 @@ func TestResolveChatBinaryAcceptsNugget(t *testing.T) {
 
 func TestNuggetChatArgsFreshUsesNoSession(t *testing.T) {
 	args := nuggetChatArgs("list the files", "")
-	want := []string{"run", "--no-session", "-t", "list the files"}
+	want := []string{"run", "--no-session", "--output-format", "stream-json", "-t", "list the files"}
 	if !slices.Equal(args, want) {
 		t.Fatalf("fresh nugget args mismatch:\n got: %v\nwant: %v", args, want)
+	}
+	if !strings.Contains(strings.Join(args, " "), "--output-format stream-json") {
+		t.Fatalf("nugget must request structured stream-json output, got %v", args)
 	}
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "--name") {
@@ -1047,7 +1050,7 @@ func TestNuggetChatArgsFreshUsesNoSession(t *testing.T) {
 
 func TestNuggetChatArgsResumeUsesNamedSession(t *testing.T) {
 	args := nuggetChatArgs("next turn", "sess-9")
-	want := []string{"run", "--name", "sess-9", "-t", "next turn"}
+	want := []string{"run", "--name", "sess-9", "--output-format", "stream-json", "-t", "next turn"}
 	if !slices.Equal(args, want) {
 		t.Fatalf("resume nugget args mismatch:\n got: %v\nwant: %v", args, want)
 	}
