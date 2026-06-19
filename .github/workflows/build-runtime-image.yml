@@ -113,7 +113,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # The runtime image is a full OpenClaw + Rockielab tenant image and recent
+    # cold Buildx runs have reached the old 60m cap before producing proof.
+    timeout-minutes: 120
     outputs:
       image_ref: ${{ steps.image.outputs.image_ref }}
       platform_skills_sha: ${{ steps.skills_sha.outputs.platform_skills_sha }}
