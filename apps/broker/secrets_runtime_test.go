@@ -285,6 +285,68 @@ func TestIsEnvNameAllowedForChild(t *testing.T) {
 	}
 }
 
+// TestOwnedChildEnvForwardsBYOKProviderEnvInNuggetMode is the nugget BYOK
+// regression: the entrypoint exports GOOSE_PROVIDER / GOOSE_MODEL +
+// OPENAI_BASE_URL and the provider key (OPENAI_API_KEY for OpenAI-compatible
+// providers, or ANTHROPIC_API_KEY for anthropic) into PID-1; the broker must
+// forward those names to the spawned nugget (Goose) child or Goose never
+// reaches the user's model. OPENAI_API_KEY / ANTHROPIC_API_KEY match the
+// block regex, so this proves the MODE-gated exact-name carve-out forwards
+// them when MODE=nugget_byok.
+func TestOwnedChildEnvForwardsBYOKProviderEnvInNuggetMode(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	t.Setenv("HOME", "/home/runtime")
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-byok")
+	t.Setenv("MODE", "nugget_byok")
+	t.Setenv("GOOSE_PROVIDER", "openai")
+	t.Setenv("GOOSE_MODEL", "deepseek-chat")
+	t.Setenv("OPENAI_BASE_URL", "https://example.com")
+	t.Setenv("OPENAI_API_KEY", "sk-byok-secret")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-byok")
+	env := ownedChildEnv()
+	for _, want := range []string{
+		"GOOSE_PROVIDER=openai",
+		"GOOSE_MODEL=deepseek-chat",
+		"OPENAI_BASE_URL=https://example.com",
+		"OPENAI_API_KEY=sk-byok-secret",
+		"ANTHROPIC_API_KEY=sk-ant-byok",
+	} {
+		found := false
+		for _, kv := range env {
+			if kv == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("nugget BYOK mode must forward provider env %q: %v", want, env)
+		}
+	}
+}
+
+// TestOwnedChildEnvScrubsBYOKKeysOutsideNuggetMode pins the ADDITIVE-ONLY
+// guarantee: in every non-nugget mode (subscription / OpenClaw-BYOK /
+// open-weights) the tenant's raw OPENAI_API_KEY / ANTHROPIC_API_KEY MUST
+// still be scrubbed from the spawned child — exactly as before this change.
+// The non-secret GOOSE coordinates would pass if set, but they are never
+// set outside nugget mode, so the existing modes stay byte-identical.
+func TestOwnedChildEnvScrubsBYOKKeysOutsideNuggetMode(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	t.Setenv("HOME", "/home/runtime")
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-openclaw")
+	t.Setenv("MODE", "byok") // OpenClaw BYOK mode, NOT nugget_byok
+	t.Setenv("OPENAI_API_KEY", "sk-must-not-leak")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-must-not-leak")
+	env := ownedChildEnv()
+	for _, blocked := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
+		if envContainsName(env, blocked) {
+			t.Fatalf("non-nugget mode must keep scrubbing %q from the spawned child: %v", blocked, env)
+		}
+	}
+	if isEnvNameAllowedForChild("OPENAI_API_KEY") {
+		t.Fatalf("OPENAI_API_KEY must stay blocked when MODE!=nugget_byok")
+	}
+}
+
 func TestMetadataCacheIsTenantScoped(t *testing.T) {
 	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-a")
 	withStubSecretsClient(t, &stubSecretsClient{metadata: map[string]string{"DEPLOY_KEY": "ssh_key"}})
