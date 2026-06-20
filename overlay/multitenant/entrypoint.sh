@@ -95,8 +95,8 @@ log() {
 # broker starts.
 #
 # BYOK contract (same names the OpenClaw BYOK branch reads):
-#   - BYOK_PROVIDER : provider name (anthropic / openai / deepseek / ...)
-#   - BYOK_MODEL_ID : model id (bare, e.g. "deepseek-chat", or "prov/model")
+#   - BYOK_PROVIDER : provider name (anthropic / openai / <openai-compatible> / ...)
+#   - BYOK_MODEL_ID : model id (bare, e.g. "gpt-4o-mini", or "prov/model")
 #   - the API key   : the STANDARD provider env var the wizard already sets
 #                     (ANTHROPIC_API_KEY for anthropic; OPENAI_API_KEY for
 #                     every OpenAI-compatible provider). No BYOK_API_KEY var.
@@ -246,6 +246,52 @@ hydrate_platform_home_bundle() {
   log "hydrate_platform_home_bundle: synced claude_skills=${claude_skill_count:-0} codex_skills=${codex_skill_count:-0} from ${bundle}"
 }
 
+# Hydrate the nugget (Goose) per-user overlay from the immutable image
+# bundle into $HOME. Tenant volumes mount over $HOME, so the image-baked
+# ~/.config/goose, ~/.local/bin (goose+nugget), and ~/.agents/plugins are
+# invisible until copied out at boot — same reason the claude/codex skill
+# bundle is hydrated. The MCP server + contract live at /opt/nugget/src
+# (outside $HOME, never hidden) and config.yaml references them by absolute
+# path, so only the per-user XDG tree needs hydrating here.
+#
+# Idempotent: re-running refreshes the platform-owned tree. memory/ recall
+# files (learning.txt / dead-end.txt) are seeded only if absent so a
+# tenant's accumulated memory is never clobbered.
+hydrate_nugget_overlay() {
+  local bundle="${ROCKIE_NUGGET_BUNDLE:-/opt/rockielab/home-bundle/nugget}"
+  if [ ! -d "$bundle" ]; then
+    log "WARN: hydrate_nugget_overlay: ${bundle} not present; skipping (nugget unavailable)"
+    return 0
+  fi
+  local home_dir="${HOME:-/home/runtime}"
+  # launchers (goose + nugget) and the goose config tree: authoritative from
+  # the image bundle.
+  sync_named_children "$bundle/.local/bin" "$home_dir/.local/bin"
+  sync_platform_tree "$bundle/.config/goose/recipes" "$home_dir/.config/goose/recipes"
+  sync_platform_tree "$bundle/.agents/plugins" "$home_dir/.agents/plugins"
+  # config.yaml + .goosehints + memory/README: copy if the bundle has them.
+  mkdir -p "$home_dir/.config/goose/memory"
+  if [ -f "$bundle/.config/goose/config.yaml" ]; then
+    rsync -a "$bundle/.config/goose/config.yaml" "$home_dir/.config/goose/config.yaml"
+  fi
+  if [ -f "$bundle/.config/goose/.goosehints" ]; then
+    rsync -a "$bundle/.config/goose/.goosehints" "$home_dir/.config/goose/.goosehints"
+  fi
+  if [ -f "$bundle/.config/goose/memory/README.md" ]; then
+    rsync -a "$bundle/.config/goose/memory/README.md" "$home_dir/.config/goose/memory/README.md"
+  fi
+  if [ -f "$bundle/.config/goose/.nugget-overlay-ref" ]; then
+    rsync -a "$bundle/.config/goose/.nugget-overlay-ref" "$home_dir/.config/goose/.nugget-overlay-ref"
+  fi
+  # memory recall files: seed only if absent (never clobber accumulated memory).
+  local f
+  for f in learning.txt dead-end.txt; do
+    [ -f "$home_dir/.config/goose/memory/$f" ] || : > "$home_dir/.config/goose/memory/$f"
+  done
+  chmod +x "$home_dir"/.local/bin/goose "$home_dir"/.local/bin/nugget 2>/dev/null || true
+  log "hydrate_nugget_overlay: synced from ${bundle} ($(cat "$home_dir/.config/goose/.nugget-overlay-ref" 2>/dev/null || echo unknown))"
+}
+
 # Render /home/runtime/.claude/settings.json.j2 → settings.json with the
 # tenant/lab/target-dir placeholders substituted. Missing env vars are
 # best-effort: log a WARN, substitute empty, do NOT exit (byok/dev may
@@ -360,6 +406,9 @@ fi
 
 # --- platform-owned home overlay + settings render (must precede broker) ----
 hydrate_platform_home_bundle
+
+# --- nugget (Goose) per-user overlay (must precede broker spawning nugget) ---
+hydrate_nugget_overlay
 
 # --- user-authored private skills (Phase A, S2) -----------------------------
 # Materialize the tenant's web-authored skills under ~/.claude/skills so the
