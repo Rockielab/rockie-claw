@@ -10,6 +10,10 @@
 #                      Anthropic / OpenAI API key (env vars).
 #   - open-weights   : OpenClaw gateway pointed at a platform-hosted
 #                      open-weights endpoint (cerebras / chutes / etc).
+#   - nugget_byok    : broker spawns the nugget (Goose) binary against the
+#                      tenant's BYOK key. No OpenClaw gateway; the broker is
+#                      the foreground process (like subscription). The BYOK
+#                      env→Goose env mapping is wire_nugget_byok_env().
 #
 # In ALL modes we start the PTY-WebSocket broker (port 7681) in the
 # background so the platform-context proxy can spawn claude/codex/bash
@@ -74,6 +78,78 @@ BROKER_PORT="${BROKER_PORT:-7681}"
 
 log() {
   printf '[entrypoint] %s\n' "$*" >&2
+}
+
+# wire_nugget_byok_env — translate the platform's BYOK contract into the
+# Goose provider env the broker-spawned `nugget` reads, and export it into
+# the broker's PID-1 environment. Ported from rockie-runtime@c9ea870.
+#
+# Called ONLY when MODE=nugget_byok (the nugget BYOK runtime). It is a pure
+# env→env mapping with no side effects, so the existing subscription /
+# OpenClaw-BYOK / open-weights modes never invoke it and stay byte-identical.
+#
+# The broker spawns nugget with a scrubbed allowlist env (apps/broker/
+# owned_env.go forwards the GOOSE_* / OPENAI_BASE_URL coordinates always and
+# the provider key only when MODE=nugget_byok), so we EXPORT here — the
+# broker then forwards those names to the child. This MUST run before the
+# broker starts.
+#
+# BYOK contract (same names the OpenClaw BYOK branch reads):
+#   - BYOK_PROVIDER : provider name (anthropic / openai / deepseek / ...)
+#   - BYOK_MODEL_ID : model id (bare, e.g. "deepseek-chat", or "prov/model")
+#   - the API key   : the STANDARD provider env var the wizard already sets
+#                     (ANTHROPIC_API_KEY for anthropic; OPENAI_API_KEY for
+#                     every OpenAI-compatible provider). No BYOK_API_KEY var.
+#   - BYOK_BASE_URL : optional OpenAI-compatible base URL override.
+#
+# Provider→protocol map (the proven Goose form):
+#   - anthropic            -> GOOSE_PROVIDER=anthropic + ANTHROPIC_API_KEY
+#   - anything else (any
+#     OpenAI-compatible API) -> GOOSE_PROVIDER=openai + OPENAI_BASE_URL +
+#                               OPENAI_API_KEY
+#
+# Generic mechanism ONLY: no provider-specific model values, no masking.
+wire_nugget_byok_env() {
+  if [ -z "${BYOK_PROVIDER:-}" ]; then
+    log "byok: BYOK_PROVIDER unset; nugget will rely on any pre-set GOOSE_* env (none injected)."
+    return 0
+  fi
+  local provider model
+  provider="$BYOK_PROVIDER"
+  model="${BYOK_MODEL_ID:-}"
+  # Strip a "provider/" prefix if the model id carries one (the wizard may
+  # send either bare ids or provider-qualified ones); Goose wants the bare id.
+  case "$model" in
+    */*) model="${model#*/}" ;;
+  esac
+  case "$provider" in
+    anthropic)
+      export GOOSE_PROVIDER="anthropic"
+      if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+        log "WARN: byok provider=anthropic but ANTHROPIC_API_KEY is unset; nugget turns will fail auth."
+      fi
+      ;;
+    *)
+      # Every non-anthropic BYOK provider is treated as OpenAI-compatible.
+      export GOOSE_PROVIDER="openai"
+      if [ -z "${OPENAI_API_KEY:-}" ]; then
+        log "WARN: byok provider=${provider} (openai-compatible) but OPENAI_API_KEY is unset; nugget turns will fail auth."
+      fi
+      # OPENAI_BASE_URL points Goose at the provider's OpenAI-compatible
+      # endpoint. Prefer an explicit BYOK_BASE_URL; only export when set so
+      # we never clobber a genuine api.openai.com default with an empty value.
+      if [ -n "${BYOK_BASE_URL:-}" ]; then
+        export OPENAI_BASE_URL="${BYOK_BASE_URL}"
+      elif [ -n "${OPENAI_BASE_URL:-}" ]; then
+        : # caller already set OPENAI_BASE_URL directly; respect it.
+      fi
+      ;;
+  esac
+  if [ -n "$model" ]; then
+    export GOOSE_MODEL="$model"
+  fi
+  local oai_key="${OPENAI_API_KEY:-}" ant_key="${ANTHROPIC_API_KEY:-}"
+  log "byok: wired nugget env GOOSE_PROVIDER=${GOOSE_PROVIDER:-} GOOSE_MODEL=${GOOSE_MODEL:-<unset>} OPENAI_BASE_URL=${OPENAI_BASE_URL:-<unset>} (key length-only check: OPENAI_API_KEY=${#oai_key} ANTHROPIC_API_KEY=${#ant_key})"
 }
 
 sync_named_children() {
@@ -298,6 +374,17 @@ fi
 
 render_settings_json
 
+# --- nugget BYOK provider env -----------------------------------------------
+# Must run BEFORE the broker starts: the broker captures its PID-1 env when
+# it spawns nugget (apps/broker/owned_env.go forwards the GOOSE_* / provider
+# names), so the mapping has to be exported into this process first. Gated on
+# MODE=nugget_byok so the existing modes are untouched.
+case "$MODE" in
+  nugget_byok)
+    wire_nugget_byok_env
+    ;;
+esac
+
 # --- broker (always-on) -----------------------------------------------------
 if [ -x /usr/local/bin/broker ]; then
   if [ -z "${BROKER_TENANT_TOKEN:-}" ]; then
@@ -338,6 +425,23 @@ case "$MODE" in
     # Warm the chosen binary so the first user-facing spawn isn't cold (#1222 S4).
     warm_subscription_binary
     # The broker is the only foreground process; wait -n so SIGTERM kills it.
+    if [ -n "${BROKER_PID:-}" ]; then
+      wait -n "$BROKER_PID"
+    else
+      exec tail -f /dev/null
+    fi
+    ;;
+  nugget_byok)
+    # nugget BYOK mode: the broker spawns the nugget (Goose) binary against
+    # the tenant's API key. wire_nugget_byok_env (run before the broker
+    # started) translated the platform BYOK contract (BYOK_PROVIDER /
+    # BYOK_MODEL_ID + the provider key) into Goose's provider env
+    # (GOOSE_PROVIDER / GOOSE_MODEL + OPENAI_BASE_URL/OPENAI_API_KEY or
+    # ANTHROPIC_API_KEY) and exported it into PID-1; owned_env.go forwards
+    # those names to the spawned nugget. No OpenClaw gateway runs in this
+    # mode. The broker stays the foreground process; a chat turn arrives via
+    # the broker spawning the nugget binary at /usr/local/bin/nugget.
+    log "MODE=nugget_byok; nugget BYOK engine wired (provider=${GOOSE_PROVIDER:-<none>}). Broker-only foreground; no OpenClaw gateway."
     if [ -n "${BROKER_PID:-}" ]; then
       wait -n "$BROKER_PID"
     else
@@ -500,7 +604,7 @@ EOF
     exec node /app/dist/index.js gateway "${GATEWAY_ARGS[@]}"
     ;;
   *)
-    log "ERROR: unknown MODE=${MODE}; expected one of: subscription, byok, open-weights"
+    log "ERROR: unknown MODE=${MODE}; expected one of: subscription, byok, open-weights, nugget_byok"
     exit 64
     ;;
 esac
