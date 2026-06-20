@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Build the per-tenant Rockielab / Pebble ML runtime image.
+# Build the thin per-tenant Rockielab / Pebble ML runtime image.
+#
+# This is the de-OpenClaw'd build: it bakes only the PTY-WS broker, the
+# official claude/codex CLIs, the nugget(Goose) harness, and the platform-
+# skills overlay. There is no OpenClaw app build, so OPENCLAW_EXTENSIONS
+# (and its `pnpm build:docker` stages) are gone.
 #
 # Inputs (env vars, all optional):
 #   PLATFORM_SKILLS_DIR   path to platform-skills checkout
 #                         (default: ../platform-skills relative to this repo,
 #                          fallback /Users/samuellarson/rocky/platform-skills)
 #   IMAGE_TAG             image tag (default: rockielab-runtime-multitenant:dev)
-#   OPENCLAW_EXTENSIONS   space-separated list of OpenClaw extensions to bundle
-#                         (default: "anthropic codex cerebras chutes")
 #   NUGGET_OVERLAY_REF    rockie-nugget commit the nugget overlay is fetched
 #                         from (default: the SHA pinned in Dockerfile.multitenant)
 #   NUGGET_GOOSE_URL      released Goose runtime binary URL (default pinned in
@@ -24,7 +27,6 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 IMAGE_TAG="${IMAGE_TAG:-rockielab-runtime-multitenant:dev}"
-OPENCLAW_EXTENSIONS="${OPENCLAW_EXTENSIONS:-anthropic codex cerebras chutes}"
 
 # Resolve platform-skills location.
 if [ -n "${PLATFORM_SKILLS_DIR:-}" ]; then
@@ -45,7 +47,6 @@ if [ ! -d "$SKILLS_DIR/skills" ]; then
 fi
 
 echo "==> Building $IMAGE_TAG"
-echo "    extensions       : $OPENCLAW_EXTENSIONS"
 echo "    platform-skills  : $SKILLS_DIR"
 echo "    Dockerfile       : Dockerfile.multitenant"
 echo
@@ -64,7 +65,6 @@ exec docker build \
   --file Dockerfile.multitenant \
   --tag "$IMAGE_TAG" \
   --build-context "skills=$SKILLS_DIR" \
-  --build-arg "OPENCLAW_EXTENSIONS=$OPENCLAW_EXTENSIONS" \
   "${NUGGET_ARGS[@]}" \
   "$@" \
   .
