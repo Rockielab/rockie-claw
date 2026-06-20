@@ -194,12 +194,24 @@ RUN set -eux; \
       #    staged + sha-correct so install.sh's verify short-circuits the fetch.
       #    REPO_ROOT = dirname(install.sh) = $SRC, so config.yaml embeds
       #    /opt/nugget/src/{mcp,contract}/... — image-stable, volume-safe.
+      # install.sh's LAST step (writing its own `nugget` launcher) trips an
+      # `MCP_DIR: unbound variable` under `set -u` in rockie-nugget@<SHA>; it
+      # exits non-zero AFTER every overlay/config artifact is already written.
+      # We overwrite that launcher anyway (below), so tolerate the trailing
+      # failure and instead VERIFY the artifacts we depend on — failing the
+      # build only if config.yaml / .goosehints / the goose binary are missing.
       HOME="$STAGE_HOME" \
       XDG_CONFIG_HOME="$STAGE_HOME/.config" \
       NUGGET_BIN_DIR="$STAGE_HOME/.local/bin" \
       NUGGET_WORKSPACE="/home/runtime/.local/share/nugget/workspace" \
       NUGGET_PLUGINS_DIR="$STAGE_HOME/.agents/plugins" \
-        bash "$SRC/install.sh"; \
+        bash "$SRC/install.sh" || echo "nugget-overlay: install.sh exited non-zero (trailing launcher bug); verifying artifacts"; \
+      test -s "$STAGE_HOME/.config/goose/config.yaml"; \
+      grep -q "enabled: true" "$STAGE_HOME/.config/goose/config.yaml"; \
+      test -s "$STAGE_HOME/.config/goose/.goosehints"; \
+      test -x "$STAGE_HOME/.local/bin/goose"; \
+      test -f "$SRC/mcp/research-env-mcp/server.py"; \
+      test -d "$SRC/contract/research-env-v1"; \
       # The install.sh `nugget` launcher re-derives goose args (run/login) and
       # would drop the broker's --no-session/--name/--output-format flags. The
       # broker (apps/broker/main.go nuggetChatArgs) already builds the correct
