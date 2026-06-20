@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "list_files",
+  "description": "List files under a workspace-relative directory. Returns one workspace-relative path per line.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string", "default": "." }
+    },
+    "required": [],
+    "additionalProperties": false
+  }
+}

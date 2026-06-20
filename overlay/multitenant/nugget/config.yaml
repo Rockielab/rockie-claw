@@ -1,0 +1,28 @@
+# Goose (nugget harness) configuration — baked into the per-tenant runtime image.
+#
+# This mounts the research-env-v1 action space (the 9 Rockie research tools) as a
+# stdio MCP extension so the nugget harness drives OUR tools, not just Goose's
+# built-in developer/shell. Proven headless end-to-end in nugget/serving/a3c-mcp.md.
+#
+# SHARP EDGE (banked in a3c-mcp.md): Goose deserializes each `extensions:` entry
+# into ExtensionEntry { enabled: bool, #[serde(flatten)] ExtensionConfig }. `enabled`
+# has NO default, so an entry that omits it fails to deserialize and is SILENTLY
+# DROPPED ("Skipping malformed extension config entry"). `enabled: true` is MANDATORY.
+#
+# Provider/model selection is intentionally NOT set here — it is injected at boot by
+# the MODE wrapper (S5: BYOK injects the user's key; Stone 1.0 injects ours). S1 only
+# bakes the harness + action space; `GOOSE_PROVIDER`/`GOOSE_MODEL`/the provider key are
+# supplied by the caller's environment.
+extensions:
+  research-env-v1:
+    enabled: true
+    type: stdio
+    name: research-env-v1
+    description: Rockie research action space (research-env-v1) — 9 tools over MCP stdio
+    cmd: python3
+    args:
+      - /opt/nugget/research-env-mcp/server.py
+    envs:
+      RESEARCH_ENV_CONTRACT_DIR: /opt/nugget/research-env-v1
+      RESEARCH_ENV_WORKSPACE: /home/runtime/workspace
+    timeout: 300

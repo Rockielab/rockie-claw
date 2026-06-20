@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "finish",
+  "description": "Terminate the task and return the final result. Call exactly once, when the task is complete or no further progress is possible.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "result": { "type": "string", "minLength": 1 }
+    },
+    "required": ["result"],
+    "additionalProperties": false
+  }
+}

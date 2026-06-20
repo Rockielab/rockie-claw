@@ -22,6 +22,18 @@ ARG OPENCLAW_NODE_BOOKWORM_IMAGE="node:24-bookworm@sha256:3a09aa6354567619221ef6
 ARG OPENCLAW_NODE_BOOKWORM_SLIM_IMAGE="node:24-bookworm-slim@sha256:e8e2e91b1378f83c5b2dd15f0247f34110e2fe895f6ca7719dbb780f929368eb"
 ARG OPENCLAW_BUN_IMAGE="oven/bun:1.3.13@sha256:87416c977a612a204eb54ab9f3927023c2a3c971f4f345a01da08ea6262ae30e"
 
+# ── nugget/Goose harness (S1: bake the trimmed Goose binary additively) ─────
+# The nugget harness is the trimmed Goose 1.38 build (~130MB, linux/amd64) —
+# llama.cpp/v8/candle dropped, remote-model-only. It does NOT exist in any git
+# repo (a 130MB binary), so it enters the image via a fetch+verify from a build
+# arg URL. When NUGGET_GOOSE_URL is empty (the default), the bake emits a stub
+# `goose` that exits non-zero with a clear message — so the image ALWAYS builds
+# and claude/codex/openclaw are unaffected. CI / scripts/build-multitenant.sh
+# supply the real URL + sha256 once the trimmed binary is published as a
+# fetchable artifact (GHCR blob / release asset). See plans/nugget-integration-2026-06-18.md S1.
+ARG NUGGET_GOOSE_URL=""
+ARG NUGGET_GOOSE_SHA256=""
+
 # ── Stage 1: OpenClaw extension package.json gather ────────────────
 FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS ext-deps
 ARG OPENCLAW_EXTENSIONS
@@ -135,6 +147,38 @@ RUN --mount=type=cache,id=broker-go-mod,target=/go/pkg/mod,sharing=locked \
     --mount=type=cache,id=broker-go-build,target=/root/.cache/go-build,sharing=locked \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} GOFLAGS="-p=1" \
       go build -ldflags="-s -w" -o /out/broker .
+
+# ── Stage 4c: Obtain the trimmed Goose (nugget) binary ─────────────
+# Fetch + sha256-verify the trimmed Goose binary from NUGGET_GOOSE_URL. If the
+# URL is empty (default), emit a stub `goose` that exits non-zero with guidance,
+# so the build never fails and the claude/codex/openclaw paths stay intact. The
+# binary is amd64-only (matching this image's linux/amd64 target).
+FROM debian:bookworm-slim AS nugget-binary
+ARG NUGGET_GOOSE_URL
+ARG NUGGET_GOOSE_SHA256
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    mkdir -p /out; \
+    if [ -n "${NUGGET_GOOSE_URL}" ]; then \
+      echo "nugget: fetching trimmed Goose binary from ${NUGGET_GOOSE_URL}"; \
+      curl -fsSL --retry 3 --retry-delay 2 -o /out/goose "${NUGGET_GOOSE_URL}"; \
+      if [ -n "${NUGGET_GOOSE_SHA256}" ]; then \
+        echo "${NUGGET_GOOSE_SHA256}  /out/goose" | sha256sum -c -; \
+      else \
+        echo "nugget: WARNING — NUGGET_GOOSE_SHA256 unset; skipping integrity check" >&2; \
+      fi; \
+      chmod 755 /out/goose; \
+      /out/goose --version || (echo "nugget: fetched goose binary failed --version" >&2 && exit 1); \
+    else \
+      echo "nugget: NUGGET_GOOSE_URL empty — baking a not-provisioned stub" >&2; \
+      printf '#!/bin/sh\necho "nugget/goose binary was not provisioned into this image." >&2\necho "Rebuild with --build-arg NUGGET_GOOSE_URL=<trimmed-goose-amd64> (+ NUGGET_GOOSE_SHA256)." >&2\necho "See plans/nugget-integration-2026-06-18.md (S1)." >&2\nexit 127\n' > /out/goose; \
+      chmod 755 /out/goose; \
+    fi
 
 # ── Stage 5: Final multitenant runtime image ───────────────────────
 FROM ${OPENCLAW_NODE_BOOKWORM_SLIM_IMAGE}
@@ -391,6 +435,41 @@ RUN for gh_host in github.com gist.github.com; do \
 # Drop in the PTY-WebSocket broker binary built in stage 4b.
 COPY --from=broker-build /out/broker /usr/local/bin/broker
 RUN chmod 755 /usr/local/bin/broker
+
+# ── nugget/Goose harness bake (S1) ─────────────────────────────────
+# Additive: a new BINARY=nugget option alongside claude/codex/openclaw. None of
+# those paths are touched. The nugget harness = the trimmed Goose binary +
+# the research-env-v1 MCP shim (the 9 Rockie research tools over stdio) + a Goose
+# config that mounts the shim with `enabled: true` (the mandatory flag, else Goose
+# silently drops the extension — banked in nugget/serving/a3c-mcp.md). See
+# plans/nugget-integration-2026-06-18.md S1.
+#
+# The provider key / model are NOT injected here — that is the MODE wrapper's job
+# (S5: BYOK vs Stone 1.0). S1 only makes the harness + action space runnable.
+COPY --from=nugget-binary /out/goose /opt/nugget/goose
+COPY --chown=root:root overlay/multitenant/nugget/nugget /usr/local/bin/nugget
+COPY --chown=runtime:runtime overlay/multitenant/nugget/research-env-mcp /opt/nugget/research-env-mcp
+COPY --chown=runtime:runtime overlay/multitenant/nugget/research-env-v1 /opt/nugget/research-env-v1
+RUN chmod 755 /opt/nugget/goose /usr/local/bin/nugget
+
+# Bake the Goose config (research-env-v1 mounted, enabled:true) at the runtime
+# user's XDG config path so `nugget run` loads the action space on first call.
+# Hydrated to the writable /home/runtime volume by entrypoint hydrate logic
+# already in place for the home-bundle pattern; baking to both the home-bundle
+# and the live home dir keeps existing + fresh tenants covered.
+COPY --chown=runtime:runtime overlay/multitenant/nugget/config.yaml /opt/nugget/config.yaml
+RUN install -d -m 0755 -o runtime -g runtime \
+      /home/runtime/.config /home/runtime/.config/goose \
+      /opt/rockielab/home-bundle/.config /opt/rockielab/home-bundle/.config/goose \
+      /home/runtime/workspace && \
+    install -m 0644 -o runtime -g runtime /opt/nugget/config.yaml /home/runtime/.config/goose/config.yaml && \
+    install -m 0644 -o runtime -g runtime /opt/nugget/config.yaml /opt/rockielab/home-bundle/.config/goose/config.yaml
+
+# Verify the nugget wrapper resolves on PATH (cheap fail-fast at build time).
+# `nugget --version` runs goose --version; with a real binary it prints the
+# Goose version, with the not-provisioned stub it exits 127 — so only assert the
+# wrapper itself resolves, not the binary (which may be a stub in default builds).
+RUN command -v nugget
 
 # Drop in the rockie-gpu CLI — the agent-facing handle on the GPU
 # broker (Phase 5 step 5 of the active MVP plan). Symlinked into

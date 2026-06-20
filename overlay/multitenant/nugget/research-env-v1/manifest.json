@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": "research-env-v1",
+  "description": "Starting action space for the Rockie research agent. Versioned and iterated freely (spec A2 / C2 — NOT frozen). One version is used end-to-end within a single eval/experiment run.",
+  "result_format": {
+    "summary": "Every tool result reaches the model as a single text block. Success: raw text, or pretty-printed JSON for structured tools. Error: a JSON object {\"error\":{\"code\":<string>,\"message\":<string>}}. See README.md § Result-string format.",
+    "error_envelope": { "error": { "code": "string", "message": "string" } }
+  },
+  "tools": [
+    { "name": "web_search",  "schema": "tools/web_search.json" },
+    { "name": "fetch_url",   "schema": "tools/fetch_url.json" },
+    { "name": "read_file",   "schema": "tools/read_file.json" },
+    { "name": "list_files",  "schema": "tools/list_files.json" },
+    { "name": "write_file",  "schema": "tools/write_file.json" },
+    { "name": "run_command", "schema": "tools/run_command.json" },
+    { "name": "submit_job",  "schema": "tools/submit_job.json" },
+    { "name": "get_job",     "schema": "tools/get_job.json" },
+    { "name": "finish",      "schema": "tools/finish.json" }
+  ]
+}

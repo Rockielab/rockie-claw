@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "run_command",
+  "description": "Run a shell command in the workspace sandbox. Returns combined stdout+stderr and the exit code. CPU-only; GPU work goes through submit_job.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "command": { "type": "string", "minLength": 1 },
+      "timeout_sec": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 120 }
+    },
+    "required": ["command"],
+    "additionalProperties": false
+  }
+}

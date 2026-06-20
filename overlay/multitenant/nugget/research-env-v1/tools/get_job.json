@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "get_job",
+  "description": "Poll a submitted job by its handle. Returns normalized state, progress, logs/metrics, and any output artifact paths. Provider/region/instance details are never surfaced.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "handle": { "type": "string", "minLength": 1 }
+    },
+    "required": ["handle"],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "submit_job",
+  "description": "Submit a GPU experiment. You specify the CAPABILITY you need (hardware class, container image, command); the platform provisions it. Returns an opaque job handle for get_job. The provider, region, connection protocol, credentials, and billing are handled below this boundary and are never surfaced to you.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "hardware": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Requested hardware class, e.g. \"8xH100\", \"1xA100-80GB\", \"cpu\". A normalized capability string, not a provider SKU."
+      },
+      "image": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Container image providing the framework/runtime (e.g. a CUDA+PyTorch or ROCm or JAX image)."
+      },
+      "command": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Command to run inside the image, in the job workspace."
+      },
+      "timeout_sec": { "type": "integer", "minimum": 1, "maximum": 86400, "default": 3600 }
+    },
+    "required": ["hardware", "image", "command"],
+    "additionalProperties": false
+  }
+}

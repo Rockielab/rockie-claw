@@ -8,6 +8,11 @@
 #   IMAGE_TAG             image tag (default: rockielab-runtime-multitenant:dev)
 #   OPENCLAW_EXTENSIONS   space-separated list of OpenClaw extensions to bundle
 #                         (default: "anthropic codex cerebras chutes")
+#   NUGGET_GOOSE_URL      URL to fetch the trimmed Goose (nugget) binary, amd64
+#                         (default: empty → bakes a not-provisioned stub; the
+#                          image still builds, claude/codex/openclaw unaffected).
+#   NUGGET_GOOSE_SHA256   sha256 of the Goose binary for integrity verification
+#                         (default: empty → fetch without checksum, warns).
 #
 # Usage:
 #   scripts/build-multitenant.sh
@@ -20,6 +25,8 @@ cd "$REPO_ROOT"
 
 IMAGE_TAG="${IMAGE_TAG:-rockielab-runtime-multitenant:dev}"
 OPENCLAW_EXTENSIONS="${OPENCLAW_EXTENSIONS:-anthropic codex cerebras chutes}"
+NUGGET_GOOSE_URL="${NUGGET_GOOSE_URL:-}"
+NUGGET_GOOSE_SHA256="${NUGGET_GOOSE_SHA256:-}"
 
 # Resolve platform-skills location.
 if [ -n "${PLATFORM_SKILLS_DIR:-}" ]; then
@@ -53,5 +60,7 @@ exec docker build \
   --tag "$IMAGE_TAG" \
   --build-context "skills=$SKILLS_DIR" \
   --build-arg "OPENCLAW_EXTENSIONS=$OPENCLAW_EXTENSIONS" \
+  --build-arg "NUGGET_GOOSE_URL=$NUGGET_GOOSE_URL" \
+  --build-arg "NUGGET_GOOSE_SHA256=$NUGGET_GOOSE_SHA256" \
   "$@" \
   .
