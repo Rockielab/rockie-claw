@@ -27,7 +27,7 @@ the broker with no OpenClaw.
 ## Constraints
 - NO .github/workflows/** changes.
 - claude/codex byte-identical (no OpenClaw in their spawn).
-- Masking: generic only (no DeepSeek/Stone-1). Scan clean.
+- Masking: generic only (no served-model identity). Scan clean.
 - Broker Go `openclaw` harness left untouched (dead-but-harmless; separate
   concern, touching it risks claude/codex spawn).
 
