@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# Multi-tenant runtime entrypoint.
+# Multi-tenant runtime entrypoint (thin / de-OpenClaw'd).
 #
 # Selects what runs in this container based on $MODE:
 #   - subscription   : official `claude` / `codex` binaries running as the
 #                      tenant's Pro/Max OAuth session. The container stays
 #                      alive (broker in foreground) so the platform-context
 #                      proxy can drive the binaries via the PTY-WS broker.
-#   - byok           : OpenClaw gateway authenticated against the tenant's
-#                      Anthropic / OpenAI API key (env vars).
-#   - open-weights   : OpenClaw gateway pointed at a platform-hosted
-#                      open-weights endpoint (cerebras / chutes / etc).
 #   - nugget_byok    : broker spawns the nugget (Goose) binary against the
-#                      tenant's BYOK key. No OpenClaw gateway; the broker is
-#                      the foreground process (like subscription). The BYOK
-#                      env→Goose env mapping is wire_nugget_byok_env().
+#                      tenant's BYOK key. The broker is the foreground process
+#                      (like subscription). The BYOK env→Goose env mapping is
+#                      wire_nugget_byok_env().
+#   - byok / open-weights : legacy mode names. The OpenClaw gateway (the old
+#                      BYOK engine) is GONE from this thin image — these names
+#                      now route to the SAME nugget BYOK path as nugget_byok,
+#                      so existing tenants pinned on MODE=byok keep working.
 #
-# In ALL modes we start the PTY-WebSocket broker (port 7681) in the
-# background so the platform-context proxy can spawn claude/codex/bash
-# PTYs at any time. In `byok` / `open-weights` the OpenClaw gateway runs
-# in the foreground; in `subscription` we `wait -n` so signals propagate.
+# In ALL modes the PTY-WebSocket broker (port 7681) is the only long-lived
+# foreground process: the platform-context proxy spawns claude/codex/nugget/
+# bash PTYs through it on demand. There is NO OpenClaw gateway in this image;
+# every mode ends in `wait -n "$BROKER_PID"` so SIGTERM propagates.
 #
 # Any extra args passed to the container are forwarded to the chosen
 # command, so `docker run ... claude --version` still works.
@@ -56,24 +56,11 @@ fi
 if [ -z "${ROCKIELAB_TENANT_TOKEN:-}" ]; then
   printf '[entrypoint] WARN: ROCKIELAB_TENANT_TOKEN is unset; token-gated platform APIs may 401\n' >&2
 fi
-# OpenClaw gateway needs to listen on the Fly machine's external
-# interface so platform-context can HTTP-proxy to it through the
-# WireGuard tunnel. Fly's 6PN private network is IPv6-ONLY (addresses
-# in fdaa::/16), so we bind to `::` (the IPv6 unspecified address)
-# which on Linux dual-stack also accepts IPv4 connections — i.e. one
-# bind covers both host-local IPv4 healthchecks and the [fdaa::]:18789
-# inbound traffic from platform-context. Auth is gated by
-# OPENCLAW_GATEWAY_TOKEN, so wide-binding is safe.
-#
-# Use OPENCLAW_BIND=lan (a mode the gateway CLI recognizes) together
-# with --host so the CLI's bind-resolution stays out of the way; the
-# --host literal wins.
-OPENCLAW_BIND="${OPENCLAW_BIND:-lan}"
-OPENCLAW_HOST="${OPENCLAW_HOST:-::}"
-# Match the gateway's documented default (src/gateway/server.impl.ts:508)
-# so platform-context's OpenClawGatewayBackend can hit it without per-
-# tenant port config.
-OPENCLAW_PORT="${OPENCLAW_PORT:-18789}"
+# The OpenClaw gateway is gone (this is the thin de-OpenClaw'd runtime), so
+# the only listening service is the PTY-WS broker on port 7681. The legacy
+# OPENCLAW_BIND / OPENCLAW_HOST / OPENCLAW_PORT gateway-bind vars went away
+# with it; OPENCLAW_WORKSPACE_DIR / OPENCLAW_SKILLS_DIR (above) stay — they
+# are the broker's workspace/skills-dir contract, not gateway config.
 BROKER_PORT="${BROKER_PORT:-7681}"
 
 log() {
@@ -84,9 +71,9 @@ log() {
 # Goose provider env the broker-spawned `nugget` reads, and export it into
 # the broker's PID-1 environment. Ported from rockie-runtime@c9ea870.
 #
-# Called ONLY when MODE=nugget_byok (the nugget BYOK runtime). It is a pure
-# env→env mapping with no side effects, so the existing subscription /
-# OpenClaw-BYOK / open-weights modes never invoke it and stay byte-identical.
+# Called for every BYOK mode (nugget_byok and the legacy byok / open-weights
+# names, which now all route to nugget). It is a pure env→env mapping with no
+# side effects; subscription mode never invokes it and stays byte-identical.
 #
 # The broker spawns nugget with a scrubbed allowlist env (apps/broker/
 # owned_env.go forwards the GOOSE_* / OPENAI_BASE_URL coordinates always and
@@ -94,7 +81,7 @@ log() {
 # broker then forwards those names to the child. This MUST run before the
 # broker starts.
 #
-# BYOK contract (same names the OpenClaw BYOK branch reads):
+# BYOK contract (the same names the legacy BYOK branch read):
 #   - BYOK_PROVIDER : provider name (anthropic / openai / <openai-compatible> / ...)
 #   - BYOK_MODEL_ID : model id (bare, e.g. "gpt-4o-mini", or "prov/model")
 #   - the API key   : the STANDARD provider env var the wizard already sets
@@ -412,7 +399,7 @@ hydrate_nugget_overlay
 
 # --- user-authored private skills (Phase A, S2) -----------------------------
 # Materialize the tenant's web-authored skills under ~/.claude/skills so the
-# subscription claude/codex binaries and the byok gateway load them. Best-effort
+# subscription claude/codex binaries and the nugget BYOK harness load them. Best-effort
 # and idempotent; the per-session SessionStart hook (settings.json.j2) re-runs
 # this so skills authored after boot appear without a Fly restart.
 if [ -x /usr/local/bin/sync-user-skills.sh ]; then
@@ -426,10 +413,12 @@ render_settings_json
 # --- nugget BYOK provider env -----------------------------------------------
 # Must run BEFORE the broker starts: the broker captures its PID-1 env when
 # it spawns nugget (apps/broker/owned_env.go forwards the GOOSE_* / provider
-# names), so the mapping has to be exported into this process first. Gated on
-# MODE=nugget_byok so the existing modes are untouched.
+# names), so the mapping has to be exported into this process first. The
+# legacy byok / open-weights names route here too: the OpenClaw gateway is
+# gone, so every BYOK tenant is now served by the broker spawning nugget.
+# subscription mode never invokes this and stays byte-identical.
 case "$MODE" in
-  nugget_byok)
+  nugget_byok|byok|open-weights)
     wire_nugget_byok_env
     ;;
 esac
@@ -480,180 +469,31 @@ case "$MODE" in
       exec tail -f /dev/null
     fi
     ;;
-  nugget_byok)
+  nugget_byok|byok|open-weights)
     # nugget BYOK mode: the broker spawns the nugget (Goose) binary against
     # the tenant's API key. wire_nugget_byok_env (run before the broker
     # started) translated the platform BYOK contract (BYOK_PROVIDER /
     # BYOK_MODEL_ID + the provider key) into Goose's provider env
     # (GOOSE_PROVIDER / GOOSE_MODEL + OPENAI_BASE_URL/OPENAI_API_KEY or
     # ANTHROPIC_API_KEY) and exported it into PID-1; owned_env.go forwards
-    # those names to the spawned nugget. No OpenClaw gateway runs in this
-    # mode. The broker stays the foreground process; a chat turn arrives via
-    # the broker spawning the nugget binary at /usr/local/bin/nugget.
-    log "MODE=nugget_byok; nugget BYOK engine wired (provider=${GOOSE_PROVIDER:-<none>}). Broker-only foreground; no OpenClaw gateway."
+    # those names to the spawned nugget. A chat turn arrives via the broker
+    # spawning the nugget binary at /usr/local/bin/nugget.
+    #
+    # The legacy byok / open-weights names land here too: the OpenClaw
+    # gateway (the old BYOK engine) is GONE from this thin image, so every
+    # BYOK tenant — including ones still pinned on MODE=byok — is served by
+    # nugget. This is the generic any-provider mechanism: no provider-
+    # specific model values, no masking (a later wave). The broker stays the
+    # only foreground process.
+    log "MODE=${MODE}; nugget BYOK engine wired (provider=${GOOSE_PROVIDER:-<none>}). Broker-only foreground; no OpenClaw gateway in this image."
     if [ -n "${BROKER_PID:-}" ]; then
       wait -n "$BROKER_PID"
     else
       exec tail -f /dev/null
     fi
     ;;
-  byok|open-weights)
-    log "MODE=${MODE}; starting OpenClaw gateway on [${OPENCLAW_HOST}]:${OPENCLAW_PORT} (bind-mode=${OPENCLAW_BIND}, chat-completions=on)."
-
-    # Gateway token: platform-context's OpenClawGatewayBackend sends
-    # `Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN`. Reuse the broker
-    # token if no dedicated one is set (same per-tenant secret, same
-    # role: proxy auth from platform-context). Without a token, the
-    # gateway accepts unauthenticated requests, which is wrong on a
-    # public Fly machine.
-    if [ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ] && [ -n "${BROKER_TENANT_TOKEN:-}" ]; then
-      export OPENCLAW_GATEWAY_TOKEN="$BROKER_TENANT_TOKEN"
-      log "openclaw: gateway token reused from BROKER_TENANT_TOKEN"
-    elif [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
-      log "openclaw: dedicated gateway token set"
-    else
-      log "WARN: no OPENCLAW_GATEWAY_TOKEN and no BROKER_TENANT_TOKEN — gateway will be open."
-    fi
-
-    # Seed a minimal openclaw.json that pins the default agent model to
-    # whatever provider the tenant's BYOK_PROVIDER says. Without this,
-    # OpenClaw's hardcoded default is openai/gpt-5.5
-    # (src/agents/defaults.ts:DEFAULT_PROVIDER/DEFAULT_MODEL), which
-    # ignores the tenant's ANTHROPIC_API_KEY and surfaces as
-    # "Error: internal error" on every chat completion.
-    #
-    # BYOK_PROVIDER is set by the wizard alongside ANTHROPIC_API_KEY (or
-    # the equivalent provider key). BYOK_MODEL_ID is the user-picked
-    # model id; we map that to OpenClaw's `provider/model` form here.
-    #
-    # We only seed the file if it doesn't already exist — re-launching a
-    # tenant must not clobber any setup-wizard-managed config the
-    # gateway may have written into the volume.
-    CONFIG_DIR="$HOME/.openclaw"
-    CONFIG_FILE="$CONFIG_DIR/openclaw.json"
-    if [ "$MODE" = "byok" ] && [ -n "${BYOK_PROVIDER:-}" ]; then
-      mkdir -p "$CONFIG_DIR"
-      PROVIDER="${BYOK_PROVIDER}"
-      MODEL_ID="${BYOK_MODEL_ID:-}"
-      # If BYOK_MODEL_ID is already "provider/model", strip the
-      # provider prefix; otherwise use the raw id (the wizard sets
-      # bare ids like "claude-sonnet-4-20250514").
-      case "$MODEL_ID" in
-        */*) MODEL_ONLY="${MODEL_ID#*/}" ;;
-        "")  MODEL_ONLY="" ;;
-        *)   MODEL_ONLY="$MODEL_ID" ;;
-      esac
-      # Provider-specific default model when the user didn't pick one.
-      if [ -z "$MODEL_ONLY" ]; then
-        case "$PROVIDER" in
-          anthropic) MODEL_ONLY="claude-sonnet-4-6" ;;
-          openai)    MODEL_ONLY="gpt-5.5" ;;
-          google)    MODEL_ONLY="gemini-3.1-pro-preview" ;;
-          *)         MODEL_ONLY="" ;;
-        esac
-      fi
-      if [ -n "$MODEL_ONLY" ]; then
-        MODEL_REF="${PROVIDER}/${MODEL_ONLY}"
-        log "openclaw: seeding ${CONFIG_FILE} with agents.defaults.model.primary=${MODEL_REF}"
-        cat > "$CONFIG_FILE" <<EOF
-{
-  "gateway": { "mode": "local" },
-  "agents": {
-    "defaults": {
-      "model": { "primary": "${MODEL_REF}" }
-    }
-  }
-}
-EOF
-        chmod 600 "$CONFIG_FILE"
-      else
-        log "WARN: BYOK_PROVIDER=${PROVIDER} but no usable model — leaving default agent model untouched"
-      fi
-    fi
-
-    # Wire mcp-rockie into the OpenClaw gateway (fleet-task #24).
-    #
-    # OpenClaw's config schema is `mcp.servers.<name>` (NESTED), not the
-    # top-level `mcpServers.<name>` that the Claude/Codex CLIs use. See
-    # `src/config/types.mcp.ts` (McpConfig.servers) +
-    # `src/agents/bundle-mcp-config.ts` (loadMergedBundleMcpConfig reads
-    # `cfg.mcp.servers`). The gateway merges this catalog into the
-    # `/v1/chat/completions` agent loop on session start.
-    #
-    # We point at the same `/home/runtime/mcp-rockie/server.js` binary
-    # that the subscription paths register via Dockerfile.multitenant.
-    # mcp-rockie is stdio-only and reads ROCKIELAB_API_BASE,
-    # ROCKIELAB_TENANT_DEV_TOKEN, ROCKIELAB_TENANT_ID, and
-    # ROCKIELAB_API_PASSWORD from env. We
-    # set the env map explicitly (rather than relying on process-env
-    # inheritance) for parity with the subscription mcp.json payload.
-    #
-    # Only seed for `byok` (and `open-weights`, since both reach this
-    # branch). `jq --argjson` merges the block onto whatever the prior
-    # write produced — preserving the existing `gateway.mode` and
-    # `agents.defaults.model.primary` keys without clobbering.
-    MCP_ROCKIE_BIN="/home/runtime/mcp-rockie/server.js"
-    if [ -f "$MCP_ROCKIE_BIN" ]; then
-      # If no prior config was seeded (no BYOK_PROVIDER), start from {}.
-      if [ ! -f "$CONFIG_FILE" ]; then
-        mkdir -p "$CONFIG_DIR"
-        printf '%s' '{}' > "$CONFIG_FILE"
-        chmod 600 "$CONFIG_FILE"
-      fi
-      MCP_SERVERS_JSON=$(jq -n \
-        --arg bin "$MCP_ROCKIE_BIN" \
-        --arg api_base "${ROCKIELAB_API_BASE:-}" \
-        --arg api_url "${ROCKIELAB_API_URL:-}" \
-        --arg tenant_token "${ROCKIELAB_TENANT_TOKEN:-}" \
-        --arg tenant_id "${ROCKIELAB_TENANT_ID:-}" \
-        --arg password "${OPEN_NOTEBOOK_PASSWORD:-}" \
-        '{
-          rockie: {
-            command: "node",
-            args: [$bin],
-            env: {
-              ROCKIELAB_API_BASE: $api_base,
-              ROCKIELAB_API_URL: $api_url,
-              ROCKIELAB_TENANT_DEV_TOKEN: $tenant_token,
-              ROCKIELAB_TENANT_ID: $tenant_id,
-              ROCKIELAB_API_PASSWORD: $password
-            }
-          }
-        }')
-      TMP_CONFIG=$(mktemp)
-      if jq --argjson servers "$MCP_SERVERS_JSON" \
-            '.mcp = ((.mcp // {}) | .servers = ((.servers // {}) + $servers))' \
-            "$CONFIG_FILE" > "$TMP_CONFIG"; then
-        mv "$TMP_CONFIG" "$CONFIG_FILE"
-        chmod 600 "$CONFIG_FILE"
-        log "openclaw: seeded mcp.servers.rockie -> ${MCP_ROCKIE_BIN}"
-      else
-        rm -f "$TMP_CONFIG"
-        log "WARN: failed to merge mcp.servers.rockie into ${CONFIG_FILE}; BYOK chat agents will have no MCP tools"
-      fi
-    else
-      log "WARN: ${MCP_ROCKIE_BIN} not present; BYOK chat agents will have no MCP tools"
-    fi
-
-    cd /app
-    GATEWAY_ARGS=(--port "$OPENCLAW_PORT" --bind "$OPENCLAW_BIND" --host "$OPENCLAW_HOST")
-    if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
-      GATEWAY_ARGS+=(--token "$OPENCLAW_GATEWAY_TOKEN")
-    else
-      GATEWAY_ARGS+=(--auth none)
-    fi
-    GATEWAY_ARGS+=(--allow-unconfigured)
-    # BYOK mode is fundamentally an OpenAI-compatible chat-completions
-    # proxy from platform-context's perspective (see
-    # platform-context/api/agent_backend.py:OpenClawGatewayBackend).
-    # Open-weights mode also targets the same endpoint. Upstream
-    # OpenClaw ships this route disabled-by-default, so we enable it
-    # here for both modes. Subscription mode never reaches this branch.
-    GATEWAY_ARGS+=(--openai-chat-completions)
-    exec node /app/dist/index.js gateway "${GATEWAY_ARGS[@]}"
-    ;;
   *)
-    log "ERROR: unknown MODE=${MODE}; expected one of: subscription, byok, open-weights, nugget_byok"
+    log "ERROR: unknown MODE=${MODE}; expected one of: subscription, nugget_byok, byok, open-weights"
     exit 64
     ;;
 esac
