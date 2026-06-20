@@ -43,10 +43,61 @@ var forwardedConnectionEnv = map[string]struct{}{
 	"HF_TOKEN": {},
 }
 
+// byokProviderEnv is the exact-name allowlist of BYOK provider env vars
+// the broker forwards from the container PID-1 env into the spawned
+// nugget (Goose) child. These are the NON-secret coordinates only —
+// GOOSE_PROVIDER / GOOSE_MODEL select the provider, OPENAI_BASE_URL
+// points Goose at the OpenAI-compatible endpoint. None of them matches
+// the block regex, and none is ever set outside nugget BYOK mode (the
+// entrypoint exports them only when MODE=nugget_byok), so forwarding
+// them unconditionally is a no-op for the subscription / OpenClaw-BYOK /
+// open-weights modes.
+//
+// nugget BYOK (MODE=nugget_byok): the runtime entrypoint translates the
+// platform's BYOK contract (BYOK_PROVIDER / BYOK_MODEL_ID + the standard
+// provider key) into Goose's provider env and exports it into the
+// broker's PID-1 env. The broker spawns nugget with ownedChildEnv() — a
+// scrubbed allowlist — so these names must be forwarded explicitly or
+// Goose never sees them.
+var byokProviderEnv = map[string]struct{}{
+	"GOOSE_PROVIDER":  {},
+	"GOOSE_MODEL":     {},
+	"OPENAI_BASE_URL": {},
+}
+
+// byokProviderKeyEnv is the exact-name allowlist of BYOK provider-CREDENTIAL
+// env vars. OPENAI_API_KEY / ANTHROPIC_API_KEY match the block regex
+// (API_KEY), so they need an exact-name carve-out in
+// isEnvNameAllowedForChild — but ONLY for the nugget BYOK path, where the
+// spawned nugget (Goose) child must read the tenant's key directly.
+//
+// This carve-out is gated on MODE=nugget_byok (see isNuggetByokMode) so the
+// existing modes stay byte-identical: in subscription / OpenClaw-BYOK /
+// open-weights the tenant's ANTHROPIC_API_KEY / OPENAI_API_KEY (a Fly app
+// secret set by the wizard) continues to be SCRUBBED from every spawned
+// claude / codex / bash PTY exactly as before — those modes never hand the
+// raw key to a spawned child (subscription uses OAuth; OpenClaw BYOK reaches
+// the gateway over HTTP). Membership is EXACT-NAME set lookup, never a
+// regex, so this carve-out can never widen to forward a platform-owned
+// secret. This is the generic any-provider mechanism: no provider-specific
+// values live here.
+var byokProviderKeyEnv = map[string]struct{}{
+	"OPENAI_API_KEY":    {},
+	"ANTHROPIC_API_KEY": {},
+}
+
 const (
 	defaultRockielabAPIBase = "https://api.rockielab.com"
 	defaultRuntimeBinary    = "codex"
+	nuggetByokMode          = "nugget_byok"
 )
+
+// isNuggetByokMode reports whether this container is the nugget BYOK
+// runtime — the only mode in which the broker forwards the tenant's raw
+// provider key to the spawned nugget (Goose) child.
+func isNuggetByokMode() bool {
+	return strings.TrimSpace(os.Getenv("MODE")) == nuggetByokMode
+}
 
 func tenantID() string {
 	return strings.TrimSpace(os.Getenv("ROCKIELAB_TENANT_ID"))
@@ -85,6 +136,20 @@ func ownedChildEnv() []string {
 	// lookup against forwardedConnectionEnv.
 	for name := range forwardedConnectionEnv {
 		allowed = append(allowed, name)
+	}
+	// BYOK provider coordinates (GOOSE_PROVIDER / GOOSE_MODEL /
+	// OPENAI_BASE_URL): non-secret, only ever present in nugget BYOK mode,
+	// so always allowed (a no-op for the other modes where they are unset).
+	for name := range byokProviderEnv {
+		allowed = append(allowed, name)
+	}
+	// BYOK provider credential (OPENAI_API_KEY / ANTHROPIC_API_KEY): only
+	// forwarded to the spawned child in nugget BYOK mode. In every other
+	// mode the tenant's raw key stays scrubbed (existing behavior).
+	if isNuggetByokMode() {
+		for name := range byokProviderKeyEnv {
+			allowed = append(allowed, name)
+		}
 	}
 	copyAllowedEnv(env, allowed)
 	if env["PATH"] == "" {
@@ -133,6 +198,16 @@ func isEnvNameAllowedForChild(key string) bool {
 	}
 	if _, ok := forwardedConnectionEnv[key]; ok {
 		return true
+	}
+	// BYOK provider coordinates (GOOSE_*/OPENAI_BASE_URL) do not match the
+	// block regex, so they fall through to the default-allow below. Only the
+	// BYOK provider KEY names (OPENAI_API_KEY / ANTHROPIC_API_KEY) match the
+	// regex and need a carve-out — gated on nugget BYOK mode so existing
+	// modes keep scrubbing the tenant's raw key from spawned children.
+	if isNuggetByokMode() {
+		if _, ok := byokProviderKeyEnv[key]; ok {
+			return true
+		}
 	}
 	return !blockedOwnedChildEnvName.MatchString(key)
 }
