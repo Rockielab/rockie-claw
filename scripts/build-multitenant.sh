@@ -8,6 +8,11 @@
 #   IMAGE_TAG             image tag (default: rockielab-runtime-multitenant:dev)
 #   OPENCLAW_EXTENSIONS   space-separated list of OpenClaw extensions to bundle
 #                         (default: "anthropic codex cerebras chutes")
+#   NUGGET_OVERLAY_REF    rockie-nugget commit the nugget overlay is fetched
+#                         from (default: the SHA pinned in Dockerfile.multitenant)
+#   NUGGET_GOOSE_URL      released Goose runtime binary URL (default pinned in
+#                         the Dockerfile; override to test a rebuilt binary)
+#   NUGGET_GOOSE_SHA256   sha256 of NUGGET_GOOSE_URL (must match if URL is set)
 #
 # Usage:
 #   scripts/build-multitenant.sh
@@ -48,10 +53,18 @@ echo
 # `--build-context skills=...` lets the skills assembly stage pull files
 # directly from the platform-skills checkout without copying them into the
 # main build context (which is the platform-runtime tree).
+# Pass the nugget bake ARGs through only when overridden, so a bare local
+# build uses the Dockerfile's hardcoded pins (no CI/workflow input needed).
+NUGGET_ARGS=()
+[ -n "${NUGGET_OVERLAY_REF:-}" ]  && NUGGET_ARGS+=(--build-arg "NUGGET_OVERLAY_REF=$NUGGET_OVERLAY_REF")
+[ -n "${NUGGET_GOOSE_URL:-}" ]    && NUGGET_ARGS+=(--build-arg "NUGGET_GOOSE_URL=$NUGGET_GOOSE_URL")
+[ -n "${NUGGET_GOOSE_SHA256:-}" ] && NUGGET_ARGS+=(--build-arg "NUGGET_GOOSE_SHA256=$NUGGET_GOOSE_SHA256")
+
 exec docker build \
   --file Dockerfile.multitenant \
   --tag "$IMAGE_TAG" \
   --build-context "skills=$SKILLS_DIR" \
   --build-arg "OPENCLAW_EXTENSIONS=$OPENCLAW_EXTENSIONS" \
+  "${NUGGET_ARGS[@]}" \
   "$@" \
   .

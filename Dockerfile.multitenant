@@ -136,6 +136,108 @@ RUN --mount=type=cache,id=broker-go-mod,target=/go/pkg/mod,sharing=locked \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} GOFLAGS="-p=1" \
       go build -ldflags="-s -w" -o /out/broker .
 
+# ── Stage 4c: Assemble the nugget (Goose) harness via FETCH ─────────
+# The nugget research harness is the SAME artifact OSS users get: we
+# FETCH it from the canonical repo (Rockielab/rockie-nugget) at a pinned
+# SHA and run its OWN install.sh to lay the overlay down — config-only,
+# so the platform bake ≡ a local `./install.sh`. This deliberately
+# REPLACES the stale committed-snapshot approach (PR #108): a vendored
+# snapshot drifts from rockie-nugget main; a SHA-pinned fetch cannot.
+#
+# Two pinned inputs:
+#   - NUGGET_OVERLAY_REF : the rockie-nugget commit the overlay comes from.
+#   - NUGGET_GOOSE_URL + NUGGET_GOOSE_SHA256 : the released Goose runtime
+#     binary (glibc-2.36, matches the bookworm-slim final base). Defaults
+#     are HARDCODED to the rockie-nugget release so NO workflow build-arg
+#     is needed — the image always builds with zero CI changes.
+#
+# The Goose binary is fetched here (not in the slim final stage) so the
+# final image stays free of build-time curl/tar churn; the staged tree is
+# COPYed in below.
+FROM debian:bookworm-slim AS nugget-overlay
+ARG NUGGET_OVERLAY_REF=13ae0cde60fe8df21f48d44a3727587e82fe3eb9
+ARG NUGGET_GOOSE_URL="https://github.com/Rockielab/rockie-nugget/releases/download/nugget-goose-v1.38.0-glibc236/goose"
+ARG NUGGET_GOOSE_SHA256="489391da775fcdafbda8bf2322b15580938f3fdad243cc8e7d03bc1e0530be98"
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl tar python3 && \
+    update-ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Stage at the SAME absolute paths the final image uses, so install.sh's
+# generated config.yaml (which embeds absolute paths to the MCP server +
+# contract) resolves identically after COPY. The repo checkout lives at
+# /opt/nugget/src (outside /home/runtime so a tenant volume mount can't
+# hide it), and the per-user XDG tree is staged at /stage/home/runtime →
+# hydrated into $HOME at boot by the entrypoint (mirrors home-bundle).
+WORKDIR /build
+RUN set -eux; \
+    SRC=/opt/nugget/src; \
+    STAGE_HOME=/stage/home/runtime; \
+    mkdir -p "$SRC" "$STAGE_HOME/.local/bin"; \
+    # 1. Fetch the rockie-nugget source at the pinned SHA (public codeload,
+    #    so no auth/token is needed inside the build). The SHA in the URL is
+    #    the pin — a different ref yields a different tarball.
+    if curl -fSL --retry 3 \
+         "https://codeload.github.com/Rockielab/rockie-nugget/tar.gz/${NUGGET_OVERLAY_REF}" \
+         -o /build/nugget-src.tar.gz; then \
+      tar -xzf /build/nugget-src.tar.gz -C "$SRC" --strip-components=1; \
+      # 2. Pre-stage the released Goose runtime binary so install.sh verifies +
+      #    installs it (sha256 pin). Same binary a local user fetches; it lives
+      #    at the final image path so the launcher + config resolve it there.
+      curl -fSL --retry 3 "${NUGGET_GOOSE_URL}" -o /build/goose; \
+      echo "${NUGGET_GOOSE_SHA256}  /build/goose" | sha256sum -c -; \
+      install -m 0755 /build/goose "$STAGE_HOME/.local/bin/goose"; \
+      # 3. Run rockie-nugget's OWN installer with platform target dirs. Same
+      #    installer a local user runs → platform ≡ local. The binary is already
+      #    staged + sha-correct so install.sh's verify short-circuits the fetch.
+      #    REPO_ROOT = dirname(install.sh) = $SRC, so config.yaml embeds
+      #    /opt/nugget/src/{mcp,contract}/... — image-stable, volume-safe.
+      # install.sh's LAST step (writing its own `nugget` launcher) trips an
+      # `MCP_DIR: unbound variable` under `set -u` in rockie-nugget@<SHA>; it
+      # exits non-zero AFTER every overlay/config artifact is already written.
+      # We overwrite that launcher anyway (below), so tolerate the trailing
+      # failure and instead VERIFY the artifacts we depend on — failing the
+      # build only if config.yaml / .goosehints / the goose binary are missing.
+      HOME="$STAGE_HOME" \
+      XDG_CONFIG_HOME="$STAGE_HOME/.config" \
+      NUGGET_BIN_DIR="$STAGE_HOME/.local/bin" \
+      NUGGET_WORKSPACE="/home/runtime/.local/share/nugget/workspace" \
+      NUGGET_PLUGINS_DIR="$STAGE_HOME/.agents/plugins" \
+        bash "$SRC/install.sh" || echo "nugget-overlay: install.sh exited non-zero (trailing launcher bug); verifying artifacts"; \
+      test -s "$STAGE_HOME/.config/goose/config.yaml"; \
+      grep -q "enabled: true" "$STAGE_HOME/.config/goose/config.yaml"; \
+      test -s "$STAGE_HOME/.config/goose/.goosehints"; \
+      test -x "$STAGE_HOME/.local/bin/goose"; \
+      test -f "$SRC/mcp/research-env-mcp/server.py"; \
+      test -d "$SRC/contract/research-env-v1"; \
+      # The install.sh `nugget` launcher re-derives goose args (run/login) and
+      # would drop the broker's --no-session/--name/--output-format flags. The
+      # broker (apps/broker/main.go nuggetChatArgs) already builds the correct
+      # goose argv and the entrypoint (wire_nugget_byok_env) already exports the
+      # GOOSE_* provider env at PID-1, so the PLATFORM `nugget` is a thin
+      # passthrough to goose. Overwrite the launcher install.sh wrote.
+      printf '#!/usr/bin/env bash\n# nugget (platform) — thin passthrough to the baked Goose runtime.\n# The broker builds the goose argv; the entrypoint exports GOOSE_* provider env.\nset -euo pipefail\nexec /home/runtime/.local/bin/goose "$@"\n' \
+        > "$STAGE_HOME/.local/bin/nugget"; \
+      chmod 0755 "$STAGE_HOME/.local/bin/nugget"; \
+      printf 'rockie-nugget@%s\n' "${NUGGET_OVERLAY_REF}" \
+        > "$STAGE_HOME/.config/goose/.nugget-overlay-ref"; \
+    else \
+      # 4. Network-unreachable fallback (same defensive pattern #108 used for
+      #    the binary): stage a stub `nugget`/`goose` that exits non-zero with a
+      #    clear message, so claude/codex/openclaw still build and run.
+      echo "nugget-overlay: WARN could not fetch rockie-nugget@${NUGGET_OVERLAY_REF}; baking not-provisioned stub" >&2; \
+      mkdir -p "$STAGE_HOME/.config/goose"; \
+      for b in goose nugget; do \
+        printf '#!/usr/bin/env bash\necho "nugget not provisioned: the rockie-nugget overlay could not be fetched at build time (NUGGET_OVERLAY_REF=%s). Rebuild with network access to https://codeload.github.com/Rockielab/rockie-nugget." >&2\nexit 1\n' \
+          "${NUGGET_OVERLAY_REF}" > "$STAGE_HOME/.local/bin/$b"; \
+        chmod 0755 "$STAGE_HOME/.local/bin/$b"; \
+      done; \
+      printf 'not-provisioned (fetch failed at build): %s\n' "${NUGGET_OVERLAY_REF}" \
+        > "$STAGE_HOME/.config/goose/.nugget-overlay-ref"; \
+    fi
+
 # ── Stage 5: Final multitenant runtime image ───────────────────────
 FROM ${OPENCLAW_NODE_BOOKWORM_SLIM_IMAGE}
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR
@@ -391,6 +493,19 @@ RUN for gh_host in github.com gist.github.com; do \
 # Drop in the PTY-WebSocket broker binary built in stage 4b.
 COPY --from=broker-build /out/broker /usr/local/bin/broker
 RUN chmod 755 /usr/local/bin/broker
+
+# ── nugget (Goose) harness — fetched from rockie-nugget@SHA, not vendored ──
+# The research-env MCP server + contract live at /opt/nugget/src (outside
+# /home/runtime so a tenant volume mount can't hide them); config.yaml
+# embeds these absolute paths. The per-user XDG overlay (goose binary,
+# config.yaml, .goosehints, recipes, memory scaffold, hooks plugin, the
+# `nugget`/`goose` launchers) is staged under /opt/rockielab/home-bundle/
+# nugget and hydrated into $HOME at boot by entrypoint.sh — exactly how the
+# claude/codex skill bundle survives the volume mount. This REPLACES the
+# committed snapshot in PR #108: the source of truth is rockie-nugget@SHA,
+# so the platform bakes the SAME nugget OSS users get (no drift).
+COPY --from=nugget-overlay --chown=runtime:runtime /opt/nugget/src /opt/nugget/src
+COPY --from=nugget-overlay --chown=runtime:runtime /stage/home/runtime /opt/rockielab/home-bundle/nugget
 
 # Drop in the rockie-gpu CLI — the agent-facing handle on the GPU
 # broker (Phase 5 step 5 of the active MVP plan). Symlinked into
