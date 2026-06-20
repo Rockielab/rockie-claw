@@ -19,8 +19,10 @@ the broker with no OpenClaw.
       templating; map legacy byok/open-weights → nugget BYOK; keep
       subscription/nugget_byok byte-identical.
 - [x] M4: build-multitenant.sh — drop OPENCLAW_EXTENSIONS build-arg.
-- [ ] M5: Hetzner full-image build (green? fast?) + 3-mode dogfood.
-- [ ] M6: Push branch + open PR (no merge).
+- [x] M5: Hetzner full-image build GREEN (BUILD_EXIT=0, 25s w/ cache) +
+      3-mode dogfood (subscription claude/codex live; legacy byok→nugget
+      no-gateway; nugget overlay bakes+hydrates, BYOK env wired).
+- [x] M6: Push branch + open PR (no merge).
 
 ## Constraints
 - NO .github/workflows/** changes.
@@ -32,3 +34,12 @@ the broker with no OpenClaw.
 ## Log
 [HEARTBEAT] 2026-06-20 M1-M4 done; Dockerfile -114 lines, entrypoint
 de-gatewayed, build-arg dropped; masking scan clean. Next: Hetzner build.
+[HEARTBEAT] 2026-06-20 Hetzner rockie-utility-1: FULL image build GREEN
+(BUILD_EXIT=0, no OpenClaw stage, no pnpm build:docker, no 60-min timeout).
+subscription mode: broker up, claude 2.1.178 + codex 0.141.0 + nugget/goose
+1.38.0 all resolve live in-container. legacy byok mode: routes to nugget,
+wire_nugget_byok_env maps openai/gpt-4o-mini, NO listener on 18789. nugget
+overlay bakes (138MB goose + research-env MCP) + hydrates. Live nugget BYOK
+turn: blocked — Keychain rockie-byok-openai reads 0 bytes; PR #112's prior
+turn evidence (NUGGET_BAKE_OK via research-env-v1) covers the overlay path.
+PR opened. Returning ready-for-review.
