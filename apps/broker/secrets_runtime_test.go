@@ -299,14 +299,14 @@ func TestOwnedChildEnvForwardsBYOKProviderEnvInNuggetMode(t *testing.T) {
 	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-byok")
 	t.Setenv("MODE", "nugget_byok")
 	t.Setenv("GOOSE_PROVIDER", "openai")
-	t.Setenv("GOOSE_MODEL", "deepseek-chat")
+	t.Setenv("GOOSE_MODEL", "example-model")
 	t.Setenv("OPENAI_BASE_URL", "https://example.com")
 	t.Setenv("OPENAI_API_KEY", "sk-byok-secret")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-byok")
 	env := ownedChildEnv()
 	for _, want := range []string{
 		"GOOSE_PROVIDER=openai",
-		"GOOSE_MODEL=deepseek-chat",
+		"GOOSE_MODEL=example-model",
 		"OPENAI_BASE_URL=https://example.com",
 		"OPENAI_API_KEY=sk-byok-secret",
 		"ANTHROPIC_API_KEY=sk-ant-byok",
@@ -319,6 +319,40 @@ func TestOwnedChildEnvForwardsBYOKProviderEnvInNuggetMode(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("nugget BYOK mode must forward provider env %q: %v", want, env)
+		}
+	}
+}
+
+// TestOwnedChildEnvForwardsProviderEnvInNuggetServedMode is the served-runtime
+// analog of the BYOK regression: when MODE=nugget_served the entrypoint exports
+// the GOOSE_*/OPENAI_* provider coordinates plus the provider key (the values
+// come from deploy-time environment), and the broker must forward those names
+// to the spawned nugget (Goose) child — including the key, which matches the
+// block regex — exactly as it does for nugget_byok.
+func TestOwnedChildEnvForwardsProviderEnvInNuggetServedMode(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	t.Setenv("HOME", "/home/runtime")
+	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-served")
+	t.Setenv("MODE", "nugget_served")
+	t.Setenv("GOOSE_PROVIDER", "openai")
+	t.Setenv("GOOSE_MODEL", "test-model")
+	t.Setenv("OPENAI_BASE_URL", "https://example.com")
+	t.Setenv("OPENAI_API_KEY", "sk-served-funded")
+	env := ownedChildEnv()
+	for _, want := range []string{
+		"GOOSE_PROVIDER=openai",
+		"GOOSE_MODEL=test-model",
+		"OPENAI_BASE_URL=https://example.com",
+		"OPENAI_API_KEY=sk-served-funded",
+	} {
+		found := false
+		for _, kv := range env {
+			if kv == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("nugget served mode must forward provider env %q: %v", want, env)
 		}
 	}
 }

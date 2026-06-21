@@ -71,8 +71,8 @@ var byokProviderEnv = map[string]struct{}{
 // isEnvNameAllowedForChild — but ONLY for the nugget BYOK path, where the
 // spawned nugget (Goose) child must read the tenant's key directly.
 //
-// This carve-out is gated on MODE=nugget_byok (see isNuggetByokMode) so the
-// existing modes stay byte-identical: in subscription / OpenClaw-BYOK /
+// This carve-out is gated on the nugget spawn modes (see isNuggetSpawnMode)
+// so the existing modes stay byte-identical: in subscription / OpenClaw-BYOK /
 // open-weights the tenant's ANTHROPIC_API_KEY / OPENAI_API_KEY (a Fly app
 // secret set by the wizard) continues to be SCRUBBED from every spawned
 // claude / codex / bash PTY exactly as before — those modes never hand the
@@ -90,13 +90,29 @@ const (
 	defaultRockielabAPIBase = "https://api.rockielab.com"
 	defaultRuntimeBinary    = "codex"
 	nuggetByokMode          = "nugget_byok"
+	// nuggetServedMode is the other mode in which the broker spawns nugget
+	// (Goose) against a provider endpoint whose key it must forward. The
+	// only difference from BYOK is a platform-context concern (who funds the
+	// key, how the turn is billed); the broker's forwarding contract is the
+	// same — the GOOSE_*/OPENAI_* coordinates plus the provider key must
+	// reach the spawned child. The endpoint/model/key VALUES are deploy-time
+	// environment, read by the entrypoint, never named here.
+	nuggetServedMode = "nugget_served"
 )
 
-// isNuggetByokMode reports whether this container is the nugget BYOK
-// runtime — the only mode in which the broker forwards the tenant's raw
-// provider key to the spawned nugget (Goose) child.
-func isNuggetByokMode() bool {
-	return strings.TrimSpace(os.Getenv("MODE")) == nuggetByokMode
+// isNuggetSpawnMode reports whether this container spawns nugget (Goose)
+// against a provider endpoint and therefore needs the provider key forwarded
+// to the child. Both nugget BYOK and the served runtime route nugget turns
+// through the broker spawning the Goose binary; every other mode
+// (subscription / OpenClaw-BYOK / open-weights) keeps the tenant key
+// scrubbed exactly as before.
+func isNuggetSpawnMode() bool {
+	switch strings.TrimSpace(os.Getenv("MODE")) {
+	case nuggetByokMode, nuggetServedMode:
+		return true
+	default:
+		return false
+	}
 }
 
 func tenantID() string {
@@ -143,10 +159,11 @@ func ownedChildEnv() []string {
 	for name := range byokProviderEnv {
 		allowed = append(allowed, name)
 	}
-	// BYOK provider credential (OPENAI_API_KEY / ANTHROPIC_API_KEY): only
-	// forwarded to the spawned child in nugget BYOK mode. In every other
-	// mode the tenant's raw key stays scrubbed (existing behavior).
-	if isNuggetByokMode() {
+	// Provider credential (OPENAI_API_KEY / ANTHROPIC_API_KEY): only
+	// forwarded to the spawned nugget child in the nugget spawn modes
+	// (BYOK or served). In every other mode the tenant's raw key stays
+	// scrubbed (existing behavior).
+	if isNuggetSpawnMode() {
 		for name := range byokProviderKeyEnv {
 			allowed = append(allowed, name)
 		}
@@ -199,12 +216,13 @@ func isEnvNameAllowedForChild(key string) bool {
 	if _, ok := forwardedConnectionEnv[key]; ok {
 		return true
 	}
-	// BYOK provider coordinates (GOOSE_*/OPENAI_BASE_URL) do not match the
-	// block regex, so they fall through to the default-allow below. Only the
-	// BYOK provider KEY names (OPENAI_API_KEY / ANTHROPIC_API_KEY) match the
-	// regex and need a carve-out — gated on nugget BYOK mode so existing
-	// modes keep scrubbing the tenant's raw key from spawned children.
-	if isNuggetByokMode() {
+	// Provider coordinates (GOOSE_*/OPENAI_BASE_URL) do not match the block
+	// regex, so they fall through to the default-allow below. Only the
+	// provider KEY names (OPENAI_API_KEY / ANTHROPIC_API_KEY) match the
+	// regex and need a carve-out — gated on the nugget spawn modes (BYOK or
+	// served) so every other mode keeps scrubbing the tenant's raw key from
+	// spawned children.
+	if isNuggetSpawnMode() {
 		if _, ok := byokProviderKeyEnv[key]; ok {
 			return true
 		}
