@@ -299,14 +299,14 @@ func TestOwnedChildEnvForwardsBYOKProviderEnvInNuggetMode(t *testing.T) {
 	t.Setenv("ROCKIELAB_TENANT_ID", "tenant-byok")
 	t.Setenv("MODE", "nugget_byok")
 	t.Setenv("GOOSE_PROVIDER", "openai")
-	t.Setenv("GOOSE_MODEL", "deepseek-chat")
+	t.Setenv("GOOSE_MODEL", "example-model")
 	t.Setenv("OPENAI_BASE_URL", "https://example.com")
 	t.Setenv("OPENAI_API_KEY", "sk-byok-secret")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-byok")
 	env := ownedChildEnv()
 	for _, want := range []string{
 		"GOOSE_PROVIDER=openai",
-		"GOOSE_MODEL=deepseek-chat",
+		"GOOSE_MODEL=example-model",
 		"OPENAI_BASE_URL=https://example.com",
 		"OPENAI_API_KEY=sk-byok-secret",
 		"ANTHROPIC_API_KEY=sk-ant-byok",
