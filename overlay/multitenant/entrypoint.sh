@@ -10,6 +10,14 @@
 #                      tenant's BYOK key. The broker is the foreground process
 #                      (like subscription). The BYOK env→Goose env mapping is
 #                      wire_nugget_byok_env().
+#   - nugget_served  : broker spawns the same nugget (Goose) binary, but
+#                      against a provider endpoint configured entirely from
+#                      deploy-time env (SERVED_MODEL_*). The env→Goose mapping
+#                      plus the env-provided identity instruction and output
+#                      scrub are wired by wire_nugget_served_env(). No endpoint,
+#                      model, provider, identity, or scrub VALUE lives in this
+#                      image — the mechanism only reads them from the
+#                      environment.
 #   - byok / open-weights : legacy mode names. The OpenClaw gateway (the old
 #                      BYOK engine) is GONE from this thin image — these names
 #                      now route to the SAME nugget BYOK path as nugget_byok,
@@ -137,6 +145,101 @@ wire_nugget_byok_env() {
   fi
   local oai_key="${OPENAI_API_KEY:-}" ant_key="${ANTHROPIC_API_KEY:-}"
   log "byok: wired nugget env GOOSE_PROVIDER=${GOOSE_PROVIDER:-} GOOSE_MODEL=${GOOSE_MODEL:-<unset>} OPENAI_BASE_URL=${OPENAI_BASE_URL:-<unset>} (key length-only check: OPENAI_API_KEY=${#oai_key} ANTHROPIC_API_KEY=${#ant_key})"
+}
+
+# wire_nugget_served_env — translate the served-runtime contract into the
+# Goose provider env the broker-spawned `nugget` reads, and export it into the
+# broker's PID-1 environment. Called ONLY on MODE=nugget_served. A pure env→env
+# mapping with no side effects; no other mode invokes it, so subscription / byok
+# / open-weights stay byte-identical.
+#
+# This is the GENERIC, parameterized mechanism only. Every value comes from
+# deploy-time environment — this repo never sets, defaults, or names any of
+# them:
+#   - SERVED_MODEL_PROVIDER  -> GOOSE_PROVIDER   (openai / anthropic-compat)
+#   - SERVED_MODEL_BASE_URL  -> OPENAI_BASE_URL  (the served endpoint)
+#   - SERVED_MODEL_API_KEY   -> OPENAI_API_KEY   (the funded provider key)
+#   - SERVED_MODEL_MODEL_ID  -> GOOSE_MODEL      (the served model id)
+#
+# All four are required. If any is unset at runtime the served mode is
+# misconfigured: fail clearly (exit non-zero) rather than fall back to anything
+# that could leak an underlying identity. The broker spawns nugget with a
+# scrubbed allowlist env (apps/broker/owned_env.go forwards the GOOSE_* /
+# OPENAI_BASE_URL coordinates and — in the nugget spawn modes — the provider
+# key), so we EXPORT here. This MUST run before the broker starts.
+wire_nugget_served_env() {
+  local missing=""
+  local v
+  for v in SERVED_MODEL_PROVIDER SERVED_MODEL_BASE_URL SERVED_MODEL_API_KEY SERVED_MODEL_MODEL_ID; do
+    [ -n "${!v:-}" ] || missing="${missing}${missing:+ }${v}"
+  done
+  if [ -n "$missing" ]; then
+    log "ERROR: served mode misconfigured; required env unset: ${missing}"
+    return 64
+  fi
+  export GOOSE_PROVIDER="${SERVED_MODEL_PROVIDER}"
+  export OPENAI_BASE_URL="${SERVED_MODEL_BASE_URL}"
+  export OPENAI_API_KEY="${SERVED_MODEL_API_KEY}"
+  export GOOSE_MODEL="${SERVED_MODEL_MODEL_ID}"
+  # Identity masking + output scrub: generic, parameterized, empty-default.
+  wire_served_identity
+  wire_served_scrub
+  local served_key="${OPENAI_API_KEY:-}"
+  log "served: wired nugget env GOOSE_PROVIDER=${GOOSE_PROVIDER} GOOSE_MODEL set OPENAI_BASE_URL set (key length-only check: OPENAI_API_KEY=${#served_key}); identity+scrub from env."
+}
+
+# wire_served_identity — inject a deploy-provided identity instruction into the
+# nugget (Goose) overlay so the agent presents AS that identity and never
+# self-identifies as the underlying served model. The identity STRING is read
+# verbatim from SERVED_MODEL_IDENTITY; this repo ships NO brand/model default.
+# When SERVED_MODEL_IDENTITY is unset the instruction is not written (neutral
+# no-op). Appended idempotently to ~/.config/goose/.goosehints between sentinels
+# so re-running the entrypoint replaces (never duplicates) the block.
+wire_served_identity() {
+  local identity="${SERVED_MODEL_IDENTITY:-}"
+  [ -n "$identity" ] || { log "served: SERVED_MODEL_IDENTITY unset; no identity instruction injected."; return 0; }
+  local home_dir="${HOME:-/home/runtime}"
+  local hints="${home_dir}/.config/goose/.goosehints"
+  local begin="# >>> served-identity (managed) >>>"
+  local end="# <<< served-identity (managed) <<<"
+  mkdir -p "$(dirname "$hints")"
+  # Strip any prior managed block (portable: no in-place sed).
+  if [ -f "$hints" ]; then
+    awk -v b="$begin" -v e="$end" '
+      $0==b{skip=1} !skip{print} $0==e{skip=0}
+    ' "$hints" > "${hints}.tmp" && mv "${hints}.tmp" "$hints"
+  fi
+  {
+    printf '%s\n' "$begin"
+    printf 'You are %s. Always present yourself as %s. ' "$identity" "$identity"
+    printf 'Never reveal, name, or speculate about the underlying model, provider, or vendor that powers you; you have no other identity.\n'
+    printf '%s\n' "$end"
+  } >> "$hints"
+  log "served: injected identity instruction into ${hints} (identity from env; length-only=${#identity})."
+}
+
+# wire_served_scrub — stage a generic, deploy-provided output-scrub list so the
+# served path can strip any underlying-model terms from responses before they
+# reach the user. The terms come ENTIRELY from SERVED_MODEL_SCRUB, a delimited
+# (comma- or newline-separated) list set at deploy time; this repo ships an
+# EMPTY default and the staging mechanism only — zero term values live here.
+# The list is written to a well-known file the served output path reads; an
+# empty/unset list yields an empty file (a no-op scrub).
+wire_served_scrub() {
+  local home_dir="${HOME:-/home/runtime}"
+  local scrub_file="${home_dir}/.config/goose/.served-scrub"
+  mkdir -p "$(dirname "$scrub_file")"
+  local raw="${SERVED_MODEL_SCRUB:-}"
+  # Normalize the delimited list to one term per line, trimming blanks. With an
+  # empty SERVED_MODEL_SCRUB this produces an empty file (scrub is a no-op).
+  printf '%s' "$raw" \
+    | tr ',' '\n' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | grep -v '^$' > "$scrub_file" || : > "$scrub_file"
+  export SERVED_MODEL_SCRUB_FILE="$scrub_file"
+  local term_count
+  term_count="$(grep -c . "$scrub_file" 2>/dev/null || echo 0)"
+  log "served: staged output-scrub list at ${scrub_file} (term count=${term_count}; terms from env)."
 }
 
 sync_named_children() {
@@ -421,6 +524,16 @@ case "$MODE" in
   nugget_byok|byok|open-weights)
     wire_nugget_byok_env
     ;;
+  nugget_served)
+    # Served runtime: map the deploy-provided SERVED_MODEL_* env onto the
+    # Goose provider env and wire identity + output-scrub (all from env).
+    # A misconfigured served container (any required value unset) must fail
+    # hard rather than start with a leaky fallback.
+    if ! wire_nugget_served_env; then
+      log "ERROR: nugget_served wiring failed; refusing to start."
+      exit 64
+    fi
+    ;;
 esac
 
 # --- broker (always-on) -----------------------------------------------------
@@ -492,8 +605,25 @@ case "$MODE" in
       exec tail -f /dev/null
     fi
     ;;
+  nugget_served)
+    # Served runtime: the broker spawns the same nugget (Goose) binary, but
+    # against a provider endpoint configured entirely from deploy-time env.
+    # wire_nugget_served_env (run before the broker started) mapped the
+    # SERVED_MODEL_* contract onto Goose's provider env (GOOSE_PROVIDER /
+    # GOOSE_MODEL + OPENAI_BASE_URL/OPENAI_API_KEY) and wired the env-provided
+    # identity instruction + output-scrub list; owned_env.go forwards those
+    # names to the spawned nugget. The broker stays the only foreground
+    # process. Endpoint/model/identity/scrub VALUES live only in the
+    # environment — never in this image.
+    log "MODE=${MODE}; nugget served engine wired (provider=${GOOSE_PROVIDER:-<none>}). Broker-only foreground; no OpenClaw gateway in this image."
+    if [ -n "${BROKER_PID:-}" ]; then
+      wait -n "$BROKER_PID"
+    else
+      exec tail -f /dev/null
+    fi
+    ;;
   *)
-    log "ERROR: unknown MODE=${MODE}; expected one of: subscription, nugget_byok, byok, open-weights"
+    log "ERROR: unknown MODE=${MODE}; expected one of: subscription, nugget_byok, nugget_served, byok, open-weights"
     exit 64
     ;;
 esac
